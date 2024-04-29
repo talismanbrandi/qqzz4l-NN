@@ -18,14 +18,11 @@ import shutil
 import json
 import argparse
 import pytorch_model_summary as pms
+from collections import OrderedDict
 
 from matplotlib import rc
 
 rc('text', usetex=True)
-# plt.rcParams['text.latex.preamble'] = []
-# plt.rcParams['font.family'] = 'serif'
-# plt.rcParams['font.serif'] = 'Times New Roman'
-# plt.rcParams['font.weight'] = 'light'
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 CLIP = 1e12
@@ -52,7 +49,7 @@ def load_data(config):
              .config('spark.memory.offHeap.enabled', True)
              .config('spark.memory.offHeap.size', '20g')
              .config('spark.dirver.maxResultSize', '20g')
-             .config('spark.debug.maxToStringFields', 100)
+             .config('spark.debug.maxToStringFields', 500)
              .appName("amp.hell").getOrCreate())
 
     # Enable Arrow-based columnar data 
@@ -168,9 +165,6 @@ class df_to_tensor(torch.utils.data.Dataset):
         df['x1'] = df['x1'].apply(lambda x: x_scale(x))
         
         # extract y
-        # if config['var_y'] == 'all':
-        #     y = df.iloc[:, config['input_shape']:]
-        # else:
         y = df[config['var_y']]
         
         # number of targets
@@ -358,74 +352,115 @@ class skip_block(torch.nn.Module):
             return self.act(y)
         
         
-def getActivation(config):
+def getActivation(act):
     ''' function for defining the activation function
         argument:
             config: the configurations file
         returns
             the specified activations function
     '''
-    if config["activation"] == 'leaky_relu':
+    if act == 'leaky_relu':
         return torch.nn.LeakyReLU()
-    elif config["activation"] == 'relu':
+    if act == 'relu':
         return torch.nn.ReLU()
-    if config["activation"] == 'softplus':
+    if act == 'softplus':
         return torch.nn.Softplus()
-    if config["activation"] == 'swish':
+    if act == 'swish':
         return torch.nn.SiLU()
-    if config["activation"] == 'sigmoid':
+    if act == 'sigmoid':
         return torch.nn.Sigmoid()
         
     
-class skip_dnn(torch.nn.Module):
+class skip_mcdnn(torch.nn.Module):
     ''' class for the DNN with skip connections: see https://arxiv.org/abs/2302.00753
     '''
     def __init__(self, sk_block, config, stream = False):
-        super(skip_dnn, self).__init__()
+        super(skip_mcdnn, self).__init__()
         self.width = config["width"]
         self.n_blocks = config["depth"] - 1
         self.input_shape = config["input_shape"]
-        self.output_shape = config['n_targets']
+        self.output_shape = config['n_col_targets']
         self.n_layers = config['skip_block_layers']
         self.stream = stream
-        self.act = getActivation(config)
+        self.act = getActivation(config['activation'])
+        self.n_columns = config['n_columns']
         
-        self.input = skip_block(self.input_shape, 
-                                self.width, 
-                                self.act, 
-                                stream = self.stream, 
-                                n_layers = self.n_layers)
-        self.core = self.make_layers(skip_block)
-        if self.stream: 
-            self.output = torch.nn.Linear(self.input_shape, self.output_shape)
-        else: 
-            self.output = torch.nn.Linear(self.width, self.output_shape)
+        self.mlp_width = config["mlp_width"]
+        self.mlp_blocks = config['mlp_blocks']
+        self.mlp_input_shape = self.output_shape * self.n_columns
+        self.mlp_output_shape = config['n_targets']
+        self.mlp_n_layers = config['mlp_skip_block_layers']
+        self.mlp_act = getActivation(config['mlp_activation'])
+        
+        self.input = OrderedDict()
+        self.core = OrderedDict()
+        self.output = OrderedDict()
+        
+        for col in range(self.n_columns):
+            self.input['input_col'+str(col)] = skip_block(self.input_shape, 
+                                                          self.width, 
+                                                          self.act, 
+                                                          stream = self.stream, 
+                                                          n_layers = self.n_layers)
             
-    def make_layers(self, skip_block):
-        layers = []
-        for bl in range(self.n_blocks):
+            self.core['core_col'+str(col)] = self.make_layers(skip_block)
             if self.stream: 
-                layers.append(skip_block(self.input_shape, 
-                                         self.width, 
-                                         self.act, 
-                                         stream=self.stream, 
-                                         n_layers = self.n_layers))
-            else:
-                layers.append(skip_block(self.width, 
-                                         self.width, 
-                                         self.act, 
-                                         n_layers = self.n_layers))
+                self.output['output_col'+str(col)] = torch.nn.Linear(self.input_shape, self.output_shape)
+            else: 
+                self.output['output_col'+str(col)] = torch.nn.Linear(self.width, self.output_shape)
+                
+        self.mlp = self.make_layers(skip_block, loc='mlp')
+        self.mlp_output = torch.nn.Linear(self.mlp_width, self.mlp_output_shape)
+        
             
-        return torch.nn.Sequential(*layers)
+    def make_layers(self, skip_block, loc='core'):
+        layers = OrderedDict()
+        l_width = self.width if loc == 'core' else self.mlp_width
+        num_blocks = self.n_blocks if loc == 'core' else self.mlp_blocks
+        i_shape = self.input_shape if loc == 'core' else self.mlp_input_shape
+        o_shape = self.output_shape if loc == 'core' else self.mlp_output_shape
+        num_layers = self.n_layers if loc == 'core' else self.mlp_n_layers
+        actt = self.act if loc == 'core' else self.mlp_act
+        
+        for bl in range(num_blocks):
+            if self.stream: 
+                layers['stream_block_'+str(bl)] = skip_block(i_shape, 
+                                                             l_width, 
+                                                             actt, 
+                                                             stream = self.stream, 
+                                                             n_layers = num_layers)
+            elif loc == 'core':
+                layers['core_block_'+str(bl)] = skip_block(l_width, 
+                                                           l_width, 
+                                                           actt, 
+                                                           n_layers = num_layers)
+            else:
+                layers['input_block_'+str(bl)] = skip_block(i_shape, 
+                                                            l_width, 
+                                                            actt, 
+                                                            n_layers = num_layers)
+            
+        return torch.nn.Sequential(layers)
+    
         
     def forward(self, x):
-        x = self.input(x)
-        x = self.core(x)
-        return self.output(x)
+        x_f = tuple()
+        for col in range(self.n_columns):
+            x_tmp = self.input['input_col'+str(col)](x)
+            x_tmp = self.core['core_col'+str(col)](x_tmp)
+            x_tmp = self.output['output_col'+str(col)](x_tmp)
+            x_f += (x_tmp,)
+        # print("x_f", x_f)
+            
+        x_out = torch.cat(x_f, dim=-1)
+        # print("x_out", x_out)
+        y = self.mlp(x_out)
+        return self.mlp_output(y)
     
     
 class dnn(torch.nn.Module):
     ''' class for a feed-forward DNN
+    TODO: modify for columns
     '''
     def __init__(self, config):
         super(dnn, self).__init__()
@@ -455,24 +490,30 @@ def nets(config):
     if config["model_type"] == 'dnn':
         regressor = dnn(config).double().to(get_device())
     elif config["model_type"] == 'skip':
-        regressor = skip_dnn(skip_block, config).double().to(get_device())
+        regressor = skip_mcdnn(skip_block, config).double().to(get_device())
     elif config["model_type"] == 'skip-stream':
-        regressor = skip_dnn(skip_block, config, stream = True).double().to(get_device())
+        regressor = skip_mcdnn(skip_block, config, stream = True).double().to(get_device())
     else:
         logging.error(' '+config["model_type"]+' not implemented. model_type can be either dnn, skip or squeeze')
         
         
     # save parameter counts
     summary = pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)).rstrip().split('\n')
-    config["trainable_parameters"] = int(summary[-3].replace(',', '')[18:])
-    config["non_trainable_parameters"] = int(summary[-2].replace(',', '')[22:])
-    config["total_parameters"] = int(summary[-4].replace(',', '')[14:])
+    # config["trainable_parameters"] = int(summary[-3].replace(',', '')[18:])
+    config["trainable_parameters"] = sum(p.numel() for p in regressor.parameters() if p.requires_grad)
+    config["non_trainable_parameters"] = sum(p.numel() for p in regressor.parameters() if not p.requires_grad)
+    config["total_parameters"] = sum(p.numel() for p in regressor.parameters())
+    
+    logging.info(f' number of trainable parameters {config["trainable_parameters"]}')
+    logging.info(f' number of non-trainable parameters {config["non_trainable_parameters"]}')
+    logging.info(f' total number of parameters {config["total_parameters"]}')
     
     # save config
     with open(config['directory']+'/config-'+config['model-uuid']+'.json', 'w') as f:
         json.dump(config, f, indent=4)
         
     return regressor
+    
 
 
 def lp_loss(p, model):
@@ -523,11 +564,12 @@ def train_one_epoch(model, train_data, f_optimizer, f_loss, config):
                 return loss.item()
         loss.backward()
         
-        # Gradient Norm Clipping
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0, norm_type=2)
+        if config["gradient_clipping"]:
+            # Gradient Norm Clipping
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0, norm_type=2)
 
-        # Gradient Value Clipping
-        torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=1.0)
+            # Gradient Value Clipping
+            torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=1.0)
         
         f_optimizer.step()
 
