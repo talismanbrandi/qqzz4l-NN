@@ -152,6 +152,10 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# newly added folders as of august 2024
+checkpoints/
+scripts/batch_scripts/run_logs/*
+
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

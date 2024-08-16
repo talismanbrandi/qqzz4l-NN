@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-import re
 import pandas as pd
 import numpy as np
 import torch
@@ -70,16 +69,12 @@ def load_data(config):
         path = path + '/'
     input_var = ['x'+str(i+1) for i in range(config['input_shape'])]
     target_var = ['y'+str(i+1) for i in range(config['amplitude_shape'])]
-
     header = input_var + target_var
     schema = StructType([StructField(header[i], DoubleType(), True) for i in range(config['input_shape']+config['amplitude_shape'])])
-
     df = {}
     df['train'] = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+'train/*.csv.*', header='true')
     
-    
     if config['var_y'] == 'all': config['var_y'] = df['train'].columns[config['input_shape']:]
-    
     
     if config['use_MC_sample']:
         mc_suffix = '_mc'
@@ -95,62 +90,10 @@ def load_data(config):
     train_sample = min(config['train-sample-size'], df['train'].count())
     validate_sample = min(config['validate-sample-size'], df['validate'].count())
     test_sample = min(config['test-sample-size'], df['test'].count())
-    
-    ########################################################################
-    # these changes were added on 15 August for allowing arithmetic operations for the y values
-    # config['var_y'] is the list containing the required fields
-    operators = ['+', '-', '*', '/']
-
-    # List of items with operators
-    with_operator = [item for item in config['var_y'] if any(op in item for op in operators)]
-    print(with_operator)
-    # List of items without operators
-    without_operator = [item for item in config['var_y'] if all(op not in item for op in operators)]
-    print(without_operator)
-    
-    # Split the items with operators into individual components
-    split_items = [subitem for item in with_operator for subitem in re.split(r'\+|\-|\*|\/', item)]
-
-    # Combine the split items with the items without operators
-    combined_list = without_operator + split_items
-
-    # Remove duplicates to get a unique list
-    unique_list = list(set(combined_list))
-
-    # Sort the list if you want it in a specific order (optional)
-    unique_list.sort()
-    
-    df['train'] = df['train'].select(*input_var, *unique_list).limit(train_sample).toPandas() 
-    df['validate'] = df['validate'].select(*input_var, *unique_list).limit(validate_sample).toPandas()
-    df['test'] = df['test'].select(*input_var, *unique_list).limit(test_sample).toPandas()
-    
-    # For each part of the dataset, apply arithmetic operations if any
-    for key in ['train', 'validate', 'test']:
-        for expr in config['var_y']:
-            if any(op in expr for op in ['+', '-', '*', '/']):
-                # Split the expression into individual components and operator
-                components = re.split(r'(\+|\-|\*|\/)', expr)
-
-                # Evaluate the expression and create a new column
-                if len(components) == 3:  # This should match the pattern "y1 + y3"
-                    col1, operator, col2 = components
-
-                    if operator == '+':
-                        df[key][expr] = df[key][col1] + df[key][col2]
-                    elif operator == '-':
-                        df[key][expr] = df[key][col1] - df[key][col2]
-                    elif operator == '*':
-                        df[key][expr] = df[key][col1] * df[key][col2]
-                    elif operator == '/':
-                        df[key][expr] = df[key][col1] / df[key][col2]
-
-    # Filter split_items to keep only those that are also in without_operator
-    filtered_items = [item for item in split_items if item not in without_operator]
-
-    # Drop the filtered items from the DataFrames
-    for key in ['train', 'validate', 'test']:
-        df[key] = df[key].drop(columns=filtered_items, errors='ignore')
-
+        
+    df['train'] = df['train'].select(*input_var, *config['var_y']).limit(train_sample).toPandas() 
+    df['validate'] = df['validate'].select(*input_var, *config['var_y']).limit(validate_sample).toPandas()
+    df['test'] = df['test'].select(*input_var, *config['var_y']).limit(test_sample).toPandas()
     
     logging.info(' training data shape: {} x {}'.format(df['train'].shape[0], df['train'].shape[1]))
     logging.info(' validation data shape: {} x {}'.format(df['validate'].shape[0], df['validate'].shape[1]))
@@ -164,9 +107,8 @@ def load_data(config):
     
     logger = spark._jvm.org.apache.log4j
     logging.getLogger("py4j.clientserver").setLevel(logging.WARN)
-
+    
     return df, spark
-
 
 
 def normalize(df, config, var_y):
