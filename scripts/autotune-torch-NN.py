@@ -783,12 +783,9 @@ def runML(df, config):
         loss_fn = torch.nn.L1Loss()
     else:
         raise ValueError('loss type not defined. Has to be mae or mse')
-    
+            
     # define the optimizer
-    initial_lr = 0.001
-    if 'initial_lr' in config: 
-        initial_lr = config['initial_lr']
-    optimizer = torch.optim.Adam(regressor.parameters(), lr=initial_lr)
+    optimizer = torch.optim.Adam(regressor.parameters(), lr=0.001)
     
     # learning rate decay
     if config['lr_decay_type'] == 'exp':
