@@ -16,7 +16,7 @@
     "initial_lr": 0.003,
     "final_lr": 1e-06,
     "decay_steps": 120000, 
-    "train-sample-size": 1000000,
+    "train-sample-size": 10000000,
     "validate-sample-size": 500000,
     "test-sample-size": 500000,
     "use_MC_sample": false,

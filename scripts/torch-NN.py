@@ -71,36 +71,43 @@ def load_data(config):
     input_var = ['x'+str(i+1) for i in range(config['input_shape'])]
     target_var = ['y'+str(i+1) for i in range(config['amplitude_shape'])]
 
+    # create a schema to hold the input data
     header = input_var + target_var
     schema = StructType([StructField(header[i], DoubleType(), True) for i in range(config['input_shape']+config['amplitude_shape'])])
-
+    
+    # load train data
     df = {}
     df['train'] = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+'train/*.csv.*', header='true')
     
+    if config['var_y'] == 'all': config['var_y'] = df['train'].columns[config['input_shape']:] # this line selects all the y values
     
-    if config['var_y'] == 'all': config['var_y'] = df['train'].columns[config['input_shape']:]
-    
-    
+    # decides whether to use the monte carlo (MC) data for test and eval set
     if config['use_MC_sample']:
         mc_suffix = '_mc'
     else:
         mc_suffix = ''
+    
+    # load eval and test set
     df['validate'] = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+'validate'+mc_suffix+'/*.csv.*', header='true')
     df['test'] = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+'test'+mc_suffix+'/*.csv.*', header='true')
 
     logging.info(' data loaded into Spark session in {:.3f} seconds'.format(time.time() - start))
     
-    # transfer the data to a pandas dataframe
+    # start the transfer the data to a pandas dataframe
     start = time.time()
     train_sample = min(config['train-sample-size'], df['train'].count())
     validate_sample = min(config['validate-sample-size'], df['validate'].count())
     test_sample = min(config['test-sample-size'], df['test'].count())
     
-    ########################################################################
-    # these changes were added on 15 August for allowing arithmetic operations for the y values
-    # config['var_y'] is the list containing the required fields
+    # Select the y values to be predicted from the dataset.
+    ##### Changes to support Arithmetic operations ######
+    # these changes were added for supporting the prediction of arithmetic expression between two y values
+    # config['var_y'] is the list containing the required fields (can be an individual y or an expression with y values)
+    # the following has the supported operations
     operators = ['+', '-', '*', '/']
 
+    # Separate the items with and without operators
+    # (e.g: if we have items [y1, y2, y3+y4], we create two lists [y1, y2] and [y3+y4])
     # List of items with operators
     with_operator = [item for item in config['var_y'] if any(op in item for op in operators)]
     print(with_operator)
@@ -111,13 +118,13 @@ def load_data(config):
     # Split the items with operators into individual components
     split_items = [subitem for item in with_operator for subitem in re.split(r'\+|\-|\*|\/', item)]
 
-    # Combine the split items with the items without operators
+    # Combine the split items with the items without operators (might contain duplicates)
     combined_list = without_operator + split_items
 
     # Remove duplicates to get a unique list
     unique_list = list(set(combined_list))
 
-    # Sort the list if you want it in a specific order (optional)
+    # Sort the list if you want it in a specific order (optional, but improves readability)
     unique_list.sort()
     
     df['train'] = df['train'].select(*input_var, *unique_list).limit(train_sample).toPandas() 
@@ -126,7 +133,8 @@ def load_data(config):
     
     # For each part of the dataset, apply arithmetic operations if any
     for key in ['train', 'validate', 'test']:
-        for expr in config['var_y']:
+        for expr in config['var_y']: # check each item to be predicted
+            # Check if the "expr" item is an arithmetic expression
             if any(op in expr for op in ['+', '-', '*', '/']):
                 # Split the expression into individual components and operator
                 components = re.split(r'(\+|\-|\*|\/)', expr)
@@ -145,13 +153,14 @@ def load_data(config):
                         df[key][expr] = df[key][col1] / df[key][col2]
 
     # Filter split_items to keep only those that are also in without_operator
+    # The filtered_items would contain the y items that are not specified explicitly in the input 
     filtered_items = [item for item in split_items if item not in without_operator]
 
     # Drop the filtered items from the DataFrames
     for key in ['train', 'validate', 'test']:
         df[key] = df[key].drop(columns=filtered_items, errors='ignore')
 
-    
+    # print the loaded data size
     logging.info(' training data shape: {} x {}'.format(df['train'].shape[0], df['train'].shape[1]))
     logging.info(' validation data shape: {} x {}'.format(df['validate'].shape[0], df['validate'].shape[1]))
     logging.info(' testing data shape: {} x {}'.format(df['test'].shape[0], df['test'].shape[1]))
@@ -170,7 +179,7 @@ def load_data(config):
 
 
 def normalize(df, config, var_y):
-    """ a function to normaliza the target distribution
+    """ a function to normalize the target distribution
         arguments:
             df: dataframe containing the target variable
             config: the config file with the run configuration
@@ -217,7 +226,6 @@ def y_unscale(y):
 class df_to_tensor(torch.utils.data.Dataset):
     ''' class to convert dataframe to torch tensor
     '''
- 
     def __init__(self, df, config):
         self.df = df.copy(deep = True)
         
@@ -244,10 +252,10 @@ class df_to_tensor(torch.utils.data.Dataset):
         # put them in tensors. Note: the reshaping of y.
         self.x = torch.tensor(x.values, dtype=torch.float64).to(get_device())
         self.y = torch.tensor(y.values, dtype=torch.float64).reshape(-1, config['n_targets']).to(get_device())
- 
+    
     def __len__(self):
         return len(self.x)
-   
+
     def __getitem__(self,idx):
         return self.x[idx], self.y[idx]
     
@@ -305,6 +313,7 @@ def init_torch(config):
     gen = torch.manual_seed(config['seed'])
     torch.set_default_dtype(torch.float64)
     
+
     device = get_device()
 
     if device.type == 'cpu':
@@ -344,11 +353,13 @@ class EarlyStopping:
                 validation_loss: the validation loss
         '''
         if epoch > config['early_stopping_start_epoch']: 
+            # reset the counter everytime a new best validation loss is encountered
             if validation_loss < self.min_validation_loss:
                 self.min_validation_loss = validation_loss
                 torch.save(model.state_dict(), self.m_path)
                 config['n_training_epochs'] = epoch
                 self.counter = 0
+            # increment everytime the loss does not go down and signal early stopping when the patience is crossed
             elif validation_loss > (self.min_validation_loss + self.min_delta):
                 self.counter += 1
                 if self.counter >= self.patience:
@@ -383,15 +394,31 @@ class skip_block(torch.nn.Module):
         self.stream = stream
         
         self.input = torch.nn.Linear(self.input_shape, self.width)
+        # Initializing weights with Glorot (Xavier) normal and biases to zero
+        torch.nn.init.xavier_normal_(self.input.weight)
+        torch.nn.init.zeros_(self.input.bias)
+
+        # create a sequence of linear layers
         self.fc_module = torch.nn.ModuleList([torch.nn.Linear(self.width, self.width) for i in range(n_layers)])
-        
+        # Apply Xavier (Glorot) normal initialization to layers of fc_module
+        for layer in self.fc_module:
+            torch.nn.init.xavier_normal_(layer.weight)
+            torch.nn.init.zeros_(layer.bias)
+
+        # if stream is true, the output layer is reshaped to input_shape, or else 
+        # the hidden layer width is maintained constant
         if self.stream:
             self.linear = torch.nn.Linear(self.width, self.input_shape)
-        else:    
+        else:
             self.linear = torch.nn.Linear(self.width, self.width)
-            
+        # Initializing weights with Glorot (Xavier) normal and biases to zero
+        torch.nn.init.xavier_normal_(self.linear.weight)
+        torch.nn.init.zeros_(self.linear.bias)
+        
+        # if input_shape is not equal to width, then add a reshape layer to reshape input_shape to width
         if self.input_shape != self.width:
             self.reshape = torch.nn.Linear(self.input_shape, self.width, bias=False)
+            torch.nn.init.xavier_normal_(self.reshape.weight)
         
         self.act = activation
         
@@ -452,18 +479,28 @@ class skip_dnn(torch.nn.Module):
         self.stream = stream
         self.act = getActivation(config)
         
+        # input data is passed to a skip block
         self.input = skip_block(self.input_shape, 
                                 self.width, 
                                 self.act, 
                                 stream = self.stream, 
                                 n_layers = self.n_layers)
         self.core = self.make_layers(skip_block)
+        
+        # based on the value of stream, last layer input can be equal to 'input_shape' or 'width'. 
         if self.stream: 
             self.output = torch.nn.Linear(self.input_shape, self.output_shape)
         else: 
             self.output = torch.nn.Linear(self.width, self.output_shape)
+        
+        # Initializing weights with Glorot (Xavier) normal and biases to zero
+        torch.nn.init.xavier_normal_(self.output.weight)
+        torch.nn.init.zeros_(self.output.bias)
             
     def make_layers(self, skip_block):
+        '''
+        create a sequence of skip blocks for the core of the skip dnn
+        '''
         layers = []
         for bl in range(self.n_blocks):
             if self.stream: 
@@ -503,6 +540,67 @@ class dnn(torch.nn.Module):
         for l in self.fc_module:
             x = self.act(l(x))
         return self.output(x)
+
+class skip_light_module(torch.nn.Module):
+    """ 
+        This is a skip dnn component of the skip_light neural network 
+        argument:
+            config: the configurations file
+    """
+    def __init__(self, config):
+        super(skip_light_module, self).__init__()
+        self.width = config["width"]
+        self.skip_layer_depth = config["skip_block_layers"]
+        self.act = getActivation(config)
+        self.fc_module = torch.nn.ModuleList([torch.nn.Linear(self.width, self.width) 
+                                              for i in range(self.skip_layer_depth)])
+        # Apply Xavier (Glorot) normal initialization to layers of fc_module
+        for layer in self.fc_module:
+            torch.nn.init.xavier_normal_(layer.weight)
+            torch.nn.init.zeros_(layer.bias)
+        
+    def forward(self, x):
+        y = x
+        # vector x shape and width are the same
+        for layer in self.fc_module:
+            y = self.act(layer(y))
+        y = y+x
+        return y
+    
+class skip_light(torch.nn.Module):
+    """
+        implementation of the skip network as a lighter version of the skip_dnn, based on Fady's implementation
+        argument:
+            config: the configurations file
+    """
+    def __init__(self, config):
+        super(skip_light, self).__init__()
+        self.input_shape = config["input_shape"]
+        self.width = config["width"]
+        self.n_modules = config["depth"]
+        self.skip_depth = config["skip_block_layers"]
+        self.output_shape = config['n_targets']
+        
+        # input layer
+        self.input = torch.nn.Linear(self.input_shape, self.width)
+        torch.nn.init.xavier_normal_(self.input.weight)  # Equivalent to 'glorot_normal'
+        torch.nn.init.zeros_(self.input.bias)  # Equivalent to 'zeros'
+        self.act = getActivation(config)
+        #skip blocks
+        self.skip_core = torch.nn.Sequential(*[
+            skip_light_module(config) 
+            for _ in range(self.n_modules)
+        ])
+        #output layer
+        self.output = torch.nn.Linear(self.width, self.output_shape)
+        torch.nn.init.xavier_normal_(self.output.weight)  # Equivalent to 'glorot_normal'
+        torch.nn.init.zeros_(self.output.bias)  # Equivalent to 'zeros'
+        
+    def forward(self, x):
+        x = self.act(self.input(x))
+        x = self.skip_core(x)
+        x = self.output(x)
+        return x
     
     
 def nets(config):
@@ -520,6 +618,8 @@ def nets(config):
         regressor = skip_dnn(skip_block, config).double().to(get_device())
     elif config["model_type"] == 'skip-stream':
         regressor = skip_dnn(skip_block, config, stream = True).double().to(get_device())
+    elif config["model_type"] == 'skip-light':
+        regressor = skip_light(config).double().to(get_device())
     else:
         logging.error(' '+config["model_type"]+' not implemented. model_type can be either dnn, skip or squeeze')
         
@@ -736,26 +836,61 @@ def test_model(model, test_data, config):
 
 ### CHANGES ON JULY 2024 - HARISH 07242024
 
-# Function to save checkpoint
 def save_checkpoint(model, optimizer, scheduler, epoch, path):
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-    }, path)
-    logging.info(" Saved state to checkpoint: " + path)
+    """
+    Saves the current model state, optimizer state, and scheduler state along with the epoch number to a checkpoint file.
 
-# Function to load checkpoint
+    Args:
+        model (torch.nn.Module): The model to save.
+        optimizer (torch.optim.Optimizer): The optimizer used in training.
+        scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler.
+        epoch (int): The current epoch number.
+        path (str): The file path where the checkpoint will be saved.
+
+    Returns:
+        None
+    """
+    # Save the model, optimizer, and scheduler state dictionaries in the given path
+    torch.save({
+        'epoch': epoch,  # Save the current epoch
+        'model_state_dict': model.state_dict(),  # Save the model's state
+        'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer's state
+        'scheduler_state_dict': scheduler.state_dict(),  # Save the scheduler's state
+    }, path)
+    logging.info("Saved state to checkpoint: " + path)
+
+
 def load_checkpoint(model, optimizer, scheduler, path):
+    """
+    Loads the model, optimizer, and scheduler states from a checkpoint file, and restores the training process.
+
+    Args:
+        model (torch.nn.Module): The model to load the state into.
+        optimizer (torch.optim.Optimizer): The optimizer to load the state into.
+        scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler to load the state into.
+        path (str): The file path from which the checkpoint will be loaded.
+
+    Returns:
+        int: The epoch to resume training from.
+    """
+    # Load the saved checkpoint from the specified path
     checkpoint = torch.load(path)
+
+    # Load the state dictionaries into the model, optimizer, and scheduler
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    logging.info(" Loaded checkpoint state from: " + path)
-    logging.info(f" Continuing at epoch: {checkpoint['epoch'] + 1}")
+
+    logging.info("Loaded checkpoint state from: " + path)
+    
+    # Continue training from the next epoch
+    logging.info(f"Continuing at epoch: {checkpoint['epoch'] + 1}")
+
+    # Get the current learning rate from the scheduler
     current_lr = scheduler.get_last_lr()
-    logging.info(f' Current learning rate: {current_lr}')
+    logging.info(f'Current learning rate: {current_lr}')
+
+    # Return the last epoch to continue training
     return checkpoint['epoch']
 #### CHANGES - HARISH END
 
