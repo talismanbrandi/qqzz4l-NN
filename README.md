@@ -126,6 +126,10 @@ pip install -r requirements.txt
 pip install ipykernel
 
 python -m ipykernel install --user --name=myenv --display-name "Python (myenv)"
+
+# ensure the data is extracted in the folder which is specified in the json
+tar -xzf qqzz4l-NN.data.tar.gz
+
 ```
 
 ## Suggested environment
