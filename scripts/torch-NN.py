@@ -932,6 +932,17 @@ def runML(df, config):
                         optimizer=optimizer,
                         gamma=gamma
                     )
+    elif config['lr_decay_type'] == 'lambda_exp':
+        # Define decay steps and decay rate
+        decay_steps = 50 * config['steps_per_epoch']
+        decay_rate = 0.7
+
+        # Lambda function for exponential decay
+        lambda_lr = lambda epoch: decay_rate ** (epoch / decay_steps)
+
+        # Learning rate scheduler using LambdaLR
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_lr)
+
     elif config['lr_decay_type'] == 'poly':
         scheduler = torch.optim.lr_scheduler.PolynomialLR(
                         optimizer=optimizer,
