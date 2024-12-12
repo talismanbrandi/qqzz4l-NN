@@ -15,7 +15,7 @@ This repository contains the code for the high-precision regressors that can be 
 The dataset `qqzz4l-NN.data.tar.gz` contains the train, eval and test datasets. 
 They have the following fields:
 
-Phase space coordinates : $x_1$, $x_2$, $x_3$, $x_4$ 
+<!-- Phase space coordinates : $x_1$, $x_2$, $x_3$, $x_4$  -->
 The corresponding helicity amplitudes $h_1$, $h_2$, . . . , $h_9$
 Each helicity amplitude has two classes [A+B] and [C]. 
 For each class there are real and imaginary parts.
@@ -52,7 +52,7 @@ QQZZ4L-NN/
 ├── data/                # contains the script to download data
 ├── models/              # contains the model weights, test results, and distribution plots and evaluation reports (PDF).
 ├── notebooks/           # contains the notebooks for drawing plots, and debugging
-├── scripts/             # contains the code for training the models (python code and batch scripts) 
+├── scripts/             # contains the code for training the models (python code and batch scripts)
 ```
 
 ## The Config (JSON) file
@@ -96,17 +96,48 @@ The JSON has these fields
 
 Sample config JSON can be found in the `scripts` folder (in the root directory) with the name `config-modelX.json` where `X` is an arbitrary number. 
 
-## What happens when the training is run
+## Functionalities supported
+1. Training of the regressor models
+1. Automatic Hyperparameter Tuning and Neural Architecture Search to find the model config
+1. Visualizing Training and Testing results, and Parameter tuning results
+
+### What happens when the training is run
 
 When a training is run, it creates a folder with its uuid in the `models` folder and the `checkpoints` folder. If an sbatch job is submitted, a corresponding folder is created inside the `scripts/batch_scripts/run_logs` folder.
 
+### What happens when the hyperparameter tuning is run
+
+When a hyperparameter tuning is run, it creates a file in the `models` folder which contains the `study` object from the `Optuna` library that has the results of the parameter tuning study. This can be visualized using a notebook in the notebooks folder.
+
+## Description of the folders
+
 ### The models folder
-A particular model folder in the `models` diirectory contains the training configuration, train history, and trained model files (JSON, Torch), test results (CSV), and distribution plots and evaluation reports (PDF).
+A particular model folder in the `models` directory contains the training configuration, train history, and trained model files (JSON, Torch), test results (CSV), and distribution plots and evaluation reports (PDF).
 
 ### The checkpoints folder
 The checkpoints folder contains folders corresponding to the models trained (named after the model uuid). A particular model folder contains the most recent training checkpoint information.
 
-### The batch_scripts and the run_logs folder
+### Scripts folder
+The scripts folder contains the code of this project. It contains the code required to load the data, create and train the models, tune the hyperparameters, and visualize the results. It has some files and sub-folders within it.
+
+### Notebooks folder
+This folder contains different notebooks for helping to visualize the results and some notebooks created for debugging purpose.
+
+`torch-NN.py` contains the code used to load the dataset, train, and test the model
+
+`torch-MCNN.py` contains the code used to load the dataset, train, and test the model but for an alternative model (Multi-Column Neural Network implementation)
+
+`supporting` directory contains the code from `torch-NN.py` that is reused as helper functions for some other code files to be used.
+
+`autotune-torch-NN.py` contains the code for automatic Hyperparameter Tuning and Neural Architecture Search
+
+`config.json` the files with the name config and the extension json in it will have the configuration for training the models
+
+`noprune-autotune-torch-NN.py` an experimental file created to perform hyperparameter tuning with Optuna without pruning trials
+
+`vloss-autotune-torch-NN.py` an experimental file created to perform hyperparameter tuning with Optuna using the best validation loss in the trial as the optimization metric
+
+#### The batch_scripts and the run_logs folder
 The `batch_scripts` folder under `scripts` contains the sbatch shell script files that will run the training in the background on a cluster. Some sample batch scripts are included with the name `model_X.sh` where `X` is some number.
 
 The `run_logs` folder inside the `batch_scripts` will store the log of execution of a batch_script whenever it is run.
@@ -122,7 +153,7 @@ conda activate myenv
 # Install dependencies
 pip install -r requirements.txt
 
-# For execution in jupyterlab notebook, create an ipykernel
+# OPTIONAL: For execution in jupyterlab notebook, create an ipykernel
 pip install ipykernel
 
 python -m ipykernel install --user --name=myenv --display-name "Python (myenv)"
@@ -140,10 +171,13 @@ The model training has been tested on the Discovery cluster with a V100 GPU. The
 1. Navigate to `/scripts` folder.
 1. Activate the conda environment.
 1. Ensure your model config file is present in the `/scripts` directory.
+1. Ensure that the dataset path is updated in the config json file before training.
 1. Use the command `python torch-NN.py config.json` where `config.json` is the training config file, and the path is relative to `/scripts` (as we  currently navigated to that directory)
 
 ## Instructions for training (background / batch script)
 1. Navigate to `/scripts` folder.
+1. Ensure your model config file is present in the `/scripts` directory.
+1. Ensure that the dataset path is updated in the config json file before training.
 1. Navigate to the `batch_scripts` folder inside `scripts`. 
 1. Ensure the shell script to run the batch job is present inside the `batch_scripts` folder.
 1. Navigate back to the `/scripts` folder.
@@ -151,17 +185,37 @@ The model training has been tested on the Discovery cluster with a V100 GPU. The
 
 Sample shell scripts for the background job submission can be found in the `scripts/batch_scripts` folder with the name `model_X.sh`
 
-## Loading the model from a checkpoint
+### Loading the model from a checkpoint for training
 If the training terminates after running for some number of epochs or if the batch job has passed the time-limit, we can resume the training from the last saved checkpoint.
 
 To do so, set the `"checkpoint_path"` argument of the config json to the model uuid of the previously trained model. Before that, ensure the checkpoints directory contains an entry by the name of the previous model.
 
+## Instructions for automatic hyperparameter tuning (live)
+1. Navigate to `/scripts` folder.
+1. Activate the conda environment.
+1. Ensure that the dataset path is updated in the `autotune-torch-NN.py` file before training.
+1. Adjust the range of the parameters to be tuned as necessary.
+1. Use the command `python autotune-torch-NN.py` to start the tuning process.
+
+## Instructions for automatic hyperparameter tuning (background / batch script)
+1. Navigate to `/scripts` folder.
+1. Activate the conda environment.
+1. Ensure that the dataset path is updated in the `autotune-torch-NN.py` file before training.
+1. Adjust the range of the parameters to be tuned as necessary.
+1. Navigate to the `batch_scripts` folder inside `scripts`. 
+1. Ensure the shell script to run the batch job is present inside the `batch_scripts` folder.
+1. Navigate back to the `/scripts` folder.
+1. Use the command `sbatch batch_scripts/model_tune.sh` where `model_tune.sh` is the shell script to run the batch job.
+
+Example shell script for the background job submission can be found in the `scripts/batch_scripts` folder with the name `model_tune.sh`
 
 ## Visualizations
 
-The visualizations can be checked after the model has been trained. The notebook to run visualizations is present in `notebooks` folder. 
+The visualizations for the training and testing can be checked after the model has finished the training process. The notebook to run visualizations is present in `notebooks` folder. 
 - The code to make the plots is present in the `plots-new.ipynb` notebook.
 - To draw plots for a trained model, navigate to the `models` directory corresponding to a particular model.
 - Locate the test-results file for the model and copy its path. The path should be relative to the notebook's location.
 - Paste the path in one of the sections of the notebook that loads the dataframe.
 - Execute the rest of the histogram plotting cells to obtain the visualizations.
+
+Similarly, the visualizations for the hyperparameter tuning can be checked by accessing the notebook `hyperparameter_tuning_results.ipynb`. The default path for the `study` object has already been set in the notebook, however, this can be changed as per convenience. 

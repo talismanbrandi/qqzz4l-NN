@@ -34,6 +34,7 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 CLIP = 1e12
 
+# function to return a copy of the config json
 def get_config():
     config_template = {
         "model_type": "skip-light",
@@ -523,9 +524,12 @@ def runML(df, config):
     return test_loader, regressor, history
 
 
+##### Functions to perform Optuna trials
+
 
 def simple_train(df, config):
-    """ run the DNN
+    """ Run the DNN for short-training. Created for the purpose of quick training to be
+        used for automatic hyperparameter tuning with Optuna.
         arguments:
             df: the dataframe including, training, validation and test
             config: the configuration dictionary for the hyperparameters
@@ -669,19 +673,19 @@ def setup_training_components(config):
 def objective(trial, config, train_loader, validation_loader, test_loader):
     
     best_abs_score = -float("Inf")
-
     #config = get_config()
-
 
     # Suggest integer values for width, depth, and num_modules
     width = trial.suggest_int("width", 24, 50)
     depth = trial.suggest_int("depth", 1, 20)
     skip_block_layers = trial.suggest_int("skip_block_layers", 1, 16)
-    
+
+    # assign the values suggested by the trial to the config dictionary
     config["width"] = width
     config["depth"] = depth
     config["skip_block_layers"] = skip_block_layers
     
+    # get the regressor, loss function, optimizer and scheduler based on the config
     regressor, loss_fn, optimizer, scheduler = setup_training_components(config)
 
     trial_number = trial.number
@@ -694,7 +698,7 @@ def objective(trial, config, train_loader, validation_loader, test_loader):
 
 
     ########################
-    # train the regressor
+    # train the regressor to evaluate the config suggested by the trial
     start = time.time()
     epoch = 0
 
@@ -704,7 +708,6 @@ def objective(trial, config, train_loader, validation_loader, test_loader):
         regressor.train(True)
         avg_loss = train_one_epoch(regressor, train_loader, optimizer, loss_fn, config)
 
-            
         # We don't need gradients on to do reporting
         regressor.train(False)
         avg_vloss, abs_score, r2_score = validate_one_epoch(regressor, validation_loader, loss_fn, config)
@@ -712,9 +715,10 @@ def objective(trial, config, train_loader, validation_loader, test_loader):
         if float(abs_score) > best_abs_score:
             best_abs_score = abs_score
         
+        # Report the metric to optuna each epoch
         trial.report(abs_score, epoch)
 
-        # Handle pruning based on the intermediate value.
+        # Handle pruning based on the intermediate value (of the metric).
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
@@ -762,14 +766,12 @@ def perform_trials(df, config):
     for key, value in trial.params.items():
         logging.info("     {}: {}".format(key, value))
 
-    # Assuming 'study' is your Optuna study object
+    # Assuming 'study' is the Optuna study object
     study_save_path = '../models/optuna_study.pkl'
     # To SAVE the study
     with open(study_save_path, 'wb') as f:
         pickle.dump(study, f)
 
-
-     
    
 
 #############################
@@ -890,6 +892,7 @@ def main():
     # load data
     df, spark = load_data(config)
 
+    # start optuna search process by performing trials
     perform_trials(df, config)
     
     logging.info(' stopping Spark session')
