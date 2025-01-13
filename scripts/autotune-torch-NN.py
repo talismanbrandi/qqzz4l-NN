@@ -59,7 +59,7 @@ def get_config():
         "test-sample-size": 500000,
         "use_MC_sample": False,
         "batch_size": 1024,
-        "steps_per_epoch": 900,
+        "steps_per_epoch": 1600,
         "early_stopping_start_epoch": 50, 
         "patience": 50,
         "monitor": "val_mse",
@@ -67,8 +67,9 @@ def get_config():
         "gradient_clipping": True,
         "verbose": 1,
         "base_directory": "../models/",
-        "epochs": 10, 
-        "model-uuid": "UUID"
+        "epochs": 20, 
+        "model-uuid": "UUID",
+        "continue_study" : False
     }
     return config_template
 
@@ -676,7 +677,7 @@ def objective(trial, config, train_loader, validation_loader, test_loader):
     #config = get_config()
 
     # Suggest integer values for width, depth, and num_modules
-    width = trial.suggest_int("width", 24, 50)
+    width = trial.suggest_int("width", 20, 45)
     depth = trial.suggest_int("depth", 1, 20)
     skip_block_layers = trial.suggest_int("skip_block_layers", 1, 16)
 
@@ -742,7 +743,14 @@ def perform_trials(df, config):
     train_loader, validation_loader, test_loader = build_data_loaders(df, config)
 
     # we create an optimization study object which will search for the best parameters and store them
-    study = optuna.create_study(direction="maximize")
+    if not config['continue_study']:
+        study = optuna.create_study(direction="maximize")
+    else:
+        study_save_path = '../models/optuna_study.pkl'
+        with open(study_save_path, 'rb') as f:
+            loaded_study = pickle.load(f)
+        study = loaded_study
+        
     # this will optimize the objective function by performing 35 trials. at the end of each trial it calls the callback function
     study.optimize(
         lambda trial: objective(trial, config, train_loader, validation_loader, test_loader), 
