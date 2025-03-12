@@ -33,7 +33,5 @@
     "verbose": 1,
     "base_directory": "../models/",
     "epochs": 2000,
-    "dropout_rate": 0.01,
-    "bn_mode": "per_layer",
     "model-uuid": "UUID"
 }

@@ -7,6 +7,13 @@
 
 This repository contains the code for the high-precision regressors that can be trained on particle physics simulation data. 
 
+Simulating the Particle Physics processes demands a lot of computational effort and the time taken may range from a few seconds to hours. Machine Learning can be used to make reasonable estimates of this simulations to reduce the computational complexity. However, this task requires making estimates/predictions that have a very low error. This repository contains the code for training models dedicated for this task.
+
+Refer to this paper for a deeper dive
+```
+Bishara, F., Paul, A. & Dy, J. High-precision regressors for particle physics. Sci Rep 14, 5294 (2024). https://doi.org/10.1038/s41598-024-52941-4
+```
+
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 
@@ -15,8 +22,10 @@ This repository contains the code for the high-precision regressors that can be 
 The dataset `qqzz4l-NN.data.tar.gz` contains the train, eval and test datasets. 
 They have the following fields:
 
-<!-- Phase space coordinates : $x_1$, $x_2$, $x_3$, $x_4$  -->
+The Phase space coordinates : $x_1$, $x_2$, $x_3$, $x_4$
+
 The corresponding helicity amplitudes $h_1$, $h_2$, . . . , $h_9$
+
 Each helicity amplitude has two classes [A+B] and [C]. 
 For each class there are real and imaginary parts.
 The real and imaginary components of the helicity amplitudes are present in this order as $y_1, \dots, y_{36}$ in the dataset.
@@ -93,6 +102,8 @@ The JSON has these fields
 *   **epochs**: Total number of epochs to train the model. Example: `1000`.
 *   **model-uuid**: Unique identifier for the model. Default: `"UUID"`. (generates a random UUID). If you want to give a specific model id, it can be specified here.
 *   **checkpoint_path**: Load the model training from a particular checkpoint. Give the name of the checkpoint directory present in the checkpoints folder. 
+*   **dropout_rate**: The percentage of the dropout to be used at the end of each skip-block (only supported by the `skip-light` config). The input range is from 0 to 1.
+*   **bn_mode**: Decides whether the batch normalization is applied to each layer or each block in the skip network. (Supported options are `per_layer` and `per_block`). If it is not given, no batch normalization is applied. 
 
 Sample config JSON can be found in the `scripts` folder (in the root directory) with the name `config-modelX.json` where `X` is an arbitrary number. 
 
@@ -123,6 +134,8 @@ The scripts folder contains the code of this project. It contains the code requi
 ### Notebooks folder
 This folder contains different notebooks for helping to visualize the results and some notebooks created for debugging purpose.
 
+### Files in the base directory
+
 `torch-NN.py` contains the code used to load the dataset, train, and test the model
 
 `torch-MCNN.py` contains the code used to load the dataset, train, and test the model but for an alternative model (Multi-Column Neural Network implementation)
@@ -133,9 +146,9 @@ This folder contains different notebooks for helping to visualize the results an
 
 `config.json` the files with the name config and the extension json in it will have the configuration for training the models
 
-`noprune-autotune-torch-NN.py` an experimental file created to perform hyperparameter tuning with Optuna without pruning trials
+<!-- `noprune-autotune-torch-NN.py` an experimental file created to perform hyperparameter tuning with Optuna without pruning trials
 
-`vloss-autotune-torch-NN.py` an experimental file created to perform hyperparameter tuning with Optuna using the best validation loss in the trial as the optimization metric
+`vloss-autotune-torch-NN.py` an experimental file created to perform hyperparameter tuning with Optuna using the best validation loss in the trial as the optimization metric -->
 
 #### The batch_scripts and the run_logs folder
 The `batch_scripts` folder under `scripts` contains the sbatch shell script files that will run the training in the background on a cluster. Some sample batch scripts are included with the name `model_X.sh` where `X` is some number.
