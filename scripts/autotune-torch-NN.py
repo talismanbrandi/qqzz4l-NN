@@ -51,17 +51,17 @@ def get_config():
         "alpha": 0,
         "normal_scaled": False,
         "lr_decay_type": "exp",
-        "initial_lr": 0.003,
+        "initial_lr": 0.0015,
         "final_lr": 1e-06,
-        "decay_steps": 120000, 
-        "train-sample-size": 10000000,
+        "decay_steps": 90000, 
+        "train-sample-size": 1000000,
         "validate-sample-size": 500000,
         "test-sample-size": 500000,
         "use_MC_sample": False,
         "batch_size": 1024,
-        "steps_per_epoch": 1600,
-        "early_stopping_start_epoch": 50, 
-        "patience": 50,
+        "steps_per_epoch": 2000, #1600,
+        "early_stopping_start_epoch": 5, 
+        "patience": 5,
         "monitor": "val_mse",
         "loss": "mse",
         "gradient_clipping": True,
@@ -677,14 +677,26 @@ def objective(trial, config, train_loader, validation_loader, test_loader):
     #config = get_config()
 
     # Suggest integer values for width, depth, and num_modules
-    width = trial.suggest_int("width", 20, 45)
-    depth = trial.suggest_int("depth", 1, 20)
-    skip_block_layers = trial.suggest_int("skip_block_layers", 1, 16)
+    width = trial.suggest_int("width", 16, 36)
+    depth = trial.suggest_int("depth", 1, 16)
+    skip_block_layers = trial.suggest_int("skip_block_layers", 1, 12)
 
     # assign the values suggested by the trial to the config dictionary
     config["width"] = width
     config["depth"] = depth
     config["skip_block_layers"] = skip_block_layers
+
+    # dropout and batch norm
+    use_dropout = trial.suggest_categorical("use_dropout", [True, False])
+    if use_dropout:
+        dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.5)
+    else:
+        dropout_rate = 0.0
+
+    # Suggest batch normalization mode including None as an option
+    bn_mode = trial.suggest_categorical("bn_mode", ["per_layer", "per_block", None])
+    config["bn_mode"] = bn_mode
+    config["dropout_rate"] = dropout_rate
     
     # get the regressor, loss function, optimizer and scheduler based on the config
     regressor, loss_fn, optimizer, scheduler = setup_training_components(config)
@@ -696,6 +708,8 @@ def objective(trial, config, train_loader, validation_loader, test_loader):
     # logging.info('\n' + pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)))
     model_parameters = sum(p.numel() for p in regressor.parameters())
     logging.info(f" Total number of parameters: {model_parameters}")
+    if model_parameters > 80000:
+        raise optuna.exceptions.TrialPruned("Model exceeds 80k parameters")
 
 
     ########################
@@ -736,7 +750,10 @@ def objective(trial, config, train_loader, validation_loader, test_loader):
 def perform_trials(df, config):
     # prints the best trial value after the end of all trials
     def print_best_callback(study, trial):
-        logging.info(f" Best value: {study.best_value}, Best params: {study.best_trial.params}")
+        try:
+            print(f" Best value: {study.best_value}, Best params: {study.best_trial.params}")
+        except ValueError:
+            print("No trials are completed yet to print the best value")
 
     #config = get_config()
     # Build data loaders
@@ -746,7 +763,7 @@ def perform_trials(df, config):
     if not config['continue_study']:
         study = optuna.create_study(direction="maximize")
     else:
-        study_save_path = '../models/optuna_study.pkl'
+        study_save_path = f'../models/optuna_study_{config["continue_study"]}.pkl'
         with open(study_save_path, 'rb') as f:
             loaded_study = pickle.load(f)
         study = loaded_study
@@ -754,28 +771,29 @@ def perform_trials(df, config):
     # this will optimize the objective function by performing 35 trials. at the end of each trial it calls the callback function
     study.optimize(
         lambda trial: objective(trial, config, train_loader, validation_loader, test_loader), 
-        n_trials=1000, timeout=28000, callbacks=[print_best_callback])
-
+        n_trials=1000000000, timeout=28000, callbacks=[print_best_callback])
+    # timeout 28000
     # pruned trials are those which do not seem to get optimal results, so optuna will terminate the training process for that trial
     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
 
-    logging.info(" Study statistics: ")
-    logging.info("   Number of finished trials: ", len(study.trials))
-    logging.info("   Number of pruned trials: ", len(pruned_trials))
-    logging.info("   Number of complete trials: ", len(complete_trials))
+    print(" Study statistics: ")
+    print("   Number of finished trials: ", len(study.trials))
+    print("   Number of pruned trials: ", len(pruned_trials))
+    print("   Number of complete trials: ", len(complete_trials))
 
-    logging.info(" Best trial:")
+    print(" Best trial:")
     trial = study.best_trial
 
-    logging.info("   Value: ", trial.value)
+    print("   Value: ", trial.value)
 
-    logging.info("   Params: ")
+    print("   Params: ")
     for key, value in trial.params.items():
-        logging.info("     {}: {}".format(key, value))
+        print("     {}: {}".format(key, value))
 
     # Assuming 'study' is the Optuna study object
-    study_save_path = '../models/optuna_study.pkl'
+    study_save_path = f'../models/optuna_study_{config["model-uuid"]}.pkl'
+    print("Saving study to path: " + study_save_path)
     # To SAVE the study
     with open(study_save_path, 'wb') as f:
         pickle.dump(study, f)
@@ -882,13 +900,13 @@ def main():
         
     # init torch
     device = init_torch(config)
-    
+
     # start time
     config["start_time"] = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime())
-    
+
     # set device
     config["device"] = device.type + ':' + device.index if device.index else device.type
-    
+
     #  create directory structure
     if config['model-uuid'] == "UUID":
         m_uuid = str(uuid.uuid4())[:8]
@@ -902,7 +920,7 @@ def main():
 
     # start optuna search process by performing trials
     perform_trials(df, config)
-    
+
     logging.info(' stopping Spark session')
     spark.stop()
 

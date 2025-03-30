@@ -9,8 +9,8 @@
         "y6"
     ],
     "activation": "leaky_relu",
-    "width": 32,
-    "depth": 10,
+    "width": 36,
+    "depth": 2,
     "skip_block_layers": 5,
     "beta": 0,
     "alpha": 0,
@@ -33,7 +33,6 @@
     "verbose": 1,
     "base_directory": "../models/",
     "epochs": 2000,
-    "dropout_rate": 0.01,
-    "bn_mode": "per_block",
+    "bn_mode": "per_layer",
     "model-uuid": "UUID"
 }

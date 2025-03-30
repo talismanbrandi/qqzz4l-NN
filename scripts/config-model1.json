@@ -1,5 +1,5 @@
 {
-    "model_type": "skip-light",
+    "model_type": "dense-net",
     "input_shape": 4,
     "amplitude_shape": 36,
     "data_dir": "/scratch/akula.ha/dataset",
@@ -9,14 +9,14 @@
         "y6"
     ],
     "activation": "leaky_relu",
-    "width": 32,
-    "depth": 10,
-    "skip_block_layers": 5,
+    "width": 64,
+    "depth": 4,
+    "skip_block_layers": 3,
     "beta": 0,
     "alpha": 0,
     "normal_scaled": false,
     "lr_decay_type": "exp",
-    "initial_lr": 0.003,
+    "initial_lr": 0.0015,
     "final_lr": 1e-06,
     "decay_steps": 120000,
     "train-sample-size": 10000000,
@@ -33,6 +33,7 @@
     "verbose": 1,
     "base_directory": "../models/",
     "epochs": 2000,
-    "bn_mode": "per_layer",
+    "bn_mode": "per_block",
+    "dropout_rate": 0.05,
     "model-uuid": "UUID"
 }

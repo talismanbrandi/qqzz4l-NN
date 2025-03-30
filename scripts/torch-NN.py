@@ -21,6 +21,7 @@ import argparse
 import pytorch_model_summary as pms
 
 from matplotlib import rc
+from supporting.nn_models import DenseModule, DenseNetRegression
 
 rc('text', usetex=False)
 # plt.rcParams['text.latex.preamble'] = []
@@ -464,6 +465,8 @@ def getActivation(config):
         return torch.nn.Tanh()
     if config["activation"] == 'prelu':
         return torch.nn.PReLU()
+    if config["activation"] == 'elu':
+        return torch.nn.ELU()
         
     
 class skip_dnn(torch.nn.Module):
@@ -725,6 +728,8 @@ def nets(config):
         regressor = skip_dnn(skip_block, config, stream = True).double().to(get_device())
     elif config["model_type"] == 'skip-light':
         regressor = skip_light(config).double().to(get_device())
+    elif config["model_type"] == 'dense-net':
+        regressor = DenseNetRegression(config).double().to(get_device())
     else:
         logging.error(' '+config["model_type"]+' not implemented. model_type can be either dnn, skip or squeeze')
         

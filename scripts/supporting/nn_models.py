@@ -7,6 +7,8 @@ import shutil
 import json
 import argparse
 import pytorch_model_summary as pms
+import torch.nn as nn
+import torch.nn.functional as F
 
 def get_device():
     ''' function to get the device the NN is running on, CPU or GPU
@@ -62,7 +64,7 @@ class EarlyStopping:
             return False
     
     
-class skip_block(torch.nn.Module):
+class skip_block(nn.Module):
     """ the basic building block of a dnn with skip connections
         arguments:
             x: the input
@@ -86,32 +88,32 @@ class skip_block(torch.nn.Module):
         self.width = width
         self.stream = stream
         
-        self.input = torch.nn.Linear(self.input_shape, self.width)
+        self.input = nn.Linear(self.input_shape, self.width)
         # Initializing weights with Glorot (Xavier) normal and biases to zero
-        torch.nn.init.xavier_normal_(self.input.weight)
-        torch.nn.init.zeros_(self.input.bias)
+        nn.init.xavier_normal_(self.input.weight)
+        nn.init.zeros_(self.input.bias)
 
         # create a sequence of linear layers
-        self.fc_module = torch.nn.ModuleList([torch.nn.Linear(self.width, self.width) for i in range(n_layers)])
+        self.fc_module = nn.ModuleList([nn.Linear(self.width, self.width) for i in range(n_layers)])
         # Apply Xavier (Glorot) normal initialization to layers of fc_module
         for layer in self.fc_module:
-            torch.nn.init.xavier_normal_(layer.weight)
-            torch.nn.init.zeros_(layer.bias)
+            nn.init.xavier_normal_(layer.weight)
+            nn.init.zeros_(layer.bias)
 
         # if stream is true, the output layer is reshaped to input_shape, or else 
         # the hidden layer width is maintained constant
         if self.stream:
-            self.linear = torch.nn.Linear(self.width, self.input_shape)
+            self.linear = nn.Linear(self.width, self.input_shape)
         else:
-            self.linear = torch.nn.Linear(self.width, self.width)
+            self.linear = nn.Linear(self.width, self.width)
         # Initializing weights with Glorot (Xavier) normal and biases to zero
-        torch.nn.init.xavier_normal_(self.linear.weight)
-        torch.nn.init.zeros_(self.linear.bias)
+        nn.init.xavier_normal_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
         
         # if input_shape is not equal to width, then add a reshape layer to reshape input_shape to width
         if self.input_shape != self.width:
-            self.reshape = torch.nn.Linear(self.input_shape, self.width, bias=False)
-            torch.nn.init.xavier_normal_(self.reshape.weight)
+            self.reshape = nn.Linear(self.input_shape, self.width, bias=False)
+            nn.init.xavier_normal_(self.reshape.weight)
         
         self.act = activation
         
@@ -144,22 +146,25 @@ def getActivation(config):
             the specified activations function
     '''
     if config["activation"] == 'leaky_relu':
-        return torch.nn.LeakyReLU()
+        return nn.LeakyReLU()
     elif config["activation"] == 'relu':
-        return torch.nn.ReLU()
+        return nn.ReLU()
     if config["activation"] == 'softplus':
-        return torch.nn.Softplus()
+        return nn.Softplus()
     if config["activation"] == 'swish':
-        return torch.nn.SiLU()
+        return nn.SiLU()
     if config["activation"] == 'sigmoid':
-        return torch.nn.Sigmoid()
+        return nn.Sigmoid()
     if config["activation"] == 'tanh':
-        return torch.nn.Tanh()
+        return nn.Tanh()
     if config["activation"] == 'prelu':
-        return torch.nn.PReLU()
+        return nn.PReLU()
+    if config["activation"] == 'elu':
+        return torch.nn.ELU()
+        
         
     
-class skip_dnn(torch.nn.Module):
+class skip_dnn(nn.Module):
     ''' class for the DNN with skip connections: see https://arxiv.org/abs/2302.00753
     '''
     def __init__(self, sk_block, config, stream = False):
@@ -182,13 +187,13 @@ class skip_dnn(torch.nn.Module):
         
         # based on the value of stream, last layer input can be equal to 'input_shape' or 'width'. 
         if self.stream: 
-            self.output = torch.nn.Linear(self.input_shape, self.output_shape)
+            self.output = nn.Linear(self.input_shape, self.output_shape)
         else: 
-            self.output = torch.nn.Linear(self.width, self.output_shape)
+            self.output = nn.Linear(self.width, self.output_shape)
         
         # Initializing weights with Glorot (Xavier) normal and biases to zero
-        torch.nn.init.xavier_normal_(self.output.weight)
-        torch.nn.init.zeros_(self.output.bias)
+        nn.init.xavier_normal_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
             
     def make_layers(self, skip_block):
         '''
@@ -208,7 +213,7 @@ class skip_dnn(torch.nn.Module):
                                          self.act, 
                                          n_layers = self.n_layers))
             
-        return torch.nn.Sequential(*layers)
+        return nn.Sequential(*layers)
         
     def forward(self, x):
         x = self.input(x)
@@ -216,16 +221,16 @@ class skip_dnn(torch.nn.Module):
         return self.output(x)
     
     
-class dnn(torch.nn.Module):
+class dnn(nn.Module):
     ''' class for a feed-forward DNN
     '''
     def __init__(self, config):
         super(dnn, self).__init__()
         self.width = config["width"]
         
-        self.input = torch.nn.Linear(config["input_shape"], self.width)
-        self.fc_module = torch.nn.ModuleList([torch.nn.Linear(self.width, self.width) for i in range(config["depth"] - 1)])
-        self.output = torch.nn.Linear(self.width, config['n_targets'])
+        self.input = nn.Linear(config["input_shape"], self.width)
+        self.fc_module = nn.ModuleList([nn.Linear(self.width, self.width) for i in range(config["depth"] - 1)])
+        self.output = nn.Linear(self.width, config['n_targets'])
         self.act = getActivation(config)
         
     def forward(self, x):
@@ -234,67 +239,257 @@ class dnn(torch.nn.Module):
             x = self.act(l(x))
         return self.output(x)
 
-class skip_light_module(torch.nn.Module):
-    """ 
-        This is a skip dnn component of the skip_light neural network 
-        argument:
-            config: the configurations file
-    """
+# class skip_light_module(nn.Module):
+#     """ 
+#         This is a skip dnn component of the skip_light neural network 
+#         argument:
+#             config: the configurations file
+#     """
+#     def __init__(self, config):
+#         super(skip_light_module, self).__init__()
+#         self.width = config["width"]
+#         self.skip_layer_depth = config["skip_block_layers"]
+#         self.act = getActivation(config)
+#         self.fc_module = nn.ModuleList([nn.Linear(self.width, self.width) 
+#                                               for i in range(self.skip_layer_depth)])
+#         # Apply Xavier (Glorot) normal initialization to layers of fc_module
+#         for layer in self.fc_module:
+#             nn.init.xavier_normal_(layer.weight)
+#             nn.init.zeros_(layer.bias)
+        
+#     def forward(self, x):
+#         y = x
+#         # vector x shape and width are the same
+#         for layer in self.fc_module:
+#             y = self.act(layer(y))
+#         y = y+x
+#         return y
+    
+# class skip_light(nn.Module):
+#     """
+#         implementation of the skip network as a lighter version of the skip_dnn, based on Fady's implementation
+#         argument:
+#             config: the configurations file
+#     """
+#     def __init__(self, config):
+#         super(skip_light, self).__init__()
+#         self.input_shape = config["input_shape"]
+#         self.width = config["width"]
+#         self.n_modules = config["depth"]
+#         self.skip_depth = config["skip_block_layers"]
+#         self.output_shape = config['n_targets']
+        
+#         # input layer
+#         self.input = nn.Linear(self.input_shape, self.width)
+#         nn.init.xavier_normal_(self.input.weight)  # Equivalent to 'glorot_normal'
+#         nn.init.zeros_(self.input.bias)  # Equivalent to 'zeros'
+#         self.act = getActivation(config)
+#         #skip blocks
+#         self.skip_core = nn.Sequential(*[
+#             skip_light_module(config) 
+#             for _ in range(self.n_modules)
+#         ])
+#         #output layer
+#         self.output = nn.Linear(self.width, self.output_shape)
+#         nn.init.xavier_normal_(self.output.weight)  # Equivalent to 'glorot_normal'
+#         nn.init.zeros_(self.output.bias)  # Equivalent to 'zeros'
+        
+#     def forward(self, x):
+#         x = self.act(self.input(x))
+#         x = self.skip_core(x)
+#         x = self.output(x)
+#         return x
+    
+
+class skip_light_module(nn.Module):
     def __init__(self, config):
         super(skip_light_module, self).__init__()
         self.width = config["width"]
         self.skip_layer_depth = config["skip_block_layers"]
         self.act = getActivation(config)
-        self.fc_module = torch.nn.ModuleList([torch.nn.Linear(self.width, self.width) 
-                                              for i in range(self.skip_layer_depth)])
-        # Apply Xavier (Glorot) normal initialization to layers of fc_module
-        for layer in self.fc_module:
-            torch.nn.init.xavier_normal_(layer.weight)
-            torch.nn.init.zeros_(layer.bias)
         
+        self.fc_module = nn.ModuleList([
+            nn.Linear(self.width, self.width) 
+            for _ in range(self.skip_layer_depth)
+        ])
+        
+        self.dropout_rate = config.get("dropout_rate", 0.0)
+        self.dropout = nn.Dropout(self.dropout_rate) if self.dropout_rate > 0 else None
+        
+        # Allow a "none" option to disable batch norm.
+        self.bn_mode = config.get("bn_mode", "per_layer")
+        if self.bn_mode == "per_layer":
+            self.bn_layers = nn.ModuleList([
+                nn.BatchNorm1d(self.width)
+                for _ in range(self.skip_layer_depth)
+            ])
+        elif self.bn_mode == "per_block":
+            self.bn_block = nn.BatchNorm1d(self.width)
+        elif self.bn_mode == None:
+            # No batch norm is used.
+            pass
+        else:
+            raise ValueError(f"Invalid bn_mode: {self.bn_mode}. Use 'per_layer', 'per_block', or 'None'.")
+    
     def forward(self, x):
         y = x
-        # vector x shape and width are the same
-        for layer in self.fc_module:
-            y = self.act(layer(y))
-        y = y+x
+        if self.bn_mode == "per_layer":
+            for layer, bn in zip(self.fc_module, self.bn_layers):
+                y = self.act(bn(layer(y)))
+            y = y + x
+        elif self.bn_mode == "per_block":
+            for layer in self.fc_module:
+                y = self.act(layer(y))
+            y = self.bn_block(y)
+            y = y + x
+        elif self.bn_mode == "none":
+            for layer in self.fc_module:
+                y = self.act(layer(y))
+            y = y + x  # Residual connection is still applied.
+        if self.dropout is not None:
+            y = self.dropout(y)
         return y
-    
-class skip_light(torch.nn.Module):
+
+class skip_light(nn.Module):
     """
-        implementation of the skip network as a lighter version of the skip_dnn, based on Fady's implementation
-        argument:
-            config: the configurations file
+    Implementation of the skip network (a lighter version of skip_dnn).
+    
+    Config keys used:
+      - "input_shape": input feature dimension.
+      - "width": width of hidden layers.
+      - "depth": number of skip modules.
+      - "skip_block_layers": number of layers per skip module.
+      - "n_targets": number of output targets.
+      - "activation": activation type (used by getActivation).
+      - (Other keys like dropout_rate and bn_mode are passed down to skip_light_module.)
     """
     def __init__(self, config):
         super(skip_light, self).__init__()
         self.input_shape = config["input_shape"]
         self.width = config["width"]
         self.n_modules = config["depth"]
-        self.skip_depth = config["skip_block_layers"]
-        self.output_shape = config['n_targets']
+        self.output_shape = config["n_targets"]
         
-        # input layer
-        self.input = torch.nn.Linear(self.input_shape, self.width)
-        torch.nn.init.xavier_normal_(self.input.weight)  # Equivalent to 'glorot_normal'
-        torch.nn.init.zeros_(self.input.bias)  # Equivalent to 'zeros'
+        # Input layer
+        self.input = nn.Linear(self.input_shape, self.width)
         self.act = getActivation(config)
-        #skip blocks
-        self.skip_core = torch.nn.Sequential(*[
-            skip_light_module(config) 
+        
+        # Skip blocks (each with its own dropout & batch normalization behavior)
+        self.skip_core = nn.Sequential(*[
+            skip_light_module(config)
             for _ in range(self.n_modules)
         ])
-        #output layer
-        self.output = torch.nn.Linear(self.width, self.output_shape)
-        torch.nn.init.xavier_normal_(self.output.weight)  # Equivalent to 'glorot_normal'
-        torch.nn.init.zeros_(self.output.bias)  # Equivalent to 'zeros'
+        
+        # Output layer
+        self.output = nn.Linear(self.width, self.output_shape)
         
     def forward(self, x):
         x = self.act(self.input(x))
         x = self.skip_core(x)
         x = self.output(x)
         return x
+
+
+class DenseModule(nn.Module):
+    """
+    A dense module (mini-MLP) with a fixed number of linear layers.
     
+    Each layer produces an output of size config["width"]. The module output
+    is concatenated with the module input in the overall network.
+    
+    Args:
+        config (dict): Configuration dictionary.
+        in_features (int): Number of input features to this module.
+    """
+    def __init__(self, config, in_features):
+        super(DenseModule, self).__init__()
+        self.num_layers = config["skip_block_layers"]
+        self.width = config["width"]
+        self.act = getActivation(config)
+        self.bn_mode = config.get("bn_mode", "per_layer")
+        self.fc_module = nn.ModuleList()
+        if self.bn_mode == "per_layer":
+            self.bn_layers = nn.ModuleList()
+        for i in range(self.num_layers):
+            if i == 0:
+                self.fc_module.append(nn.Linear(in_features, self.width))
+            else:
+                self.fc_module.append(nn.Linear(self.width, self.width))
+            if self.bn_mode == "per_layer":
+                self.bn_layers.append(nn.BatchNorm1d(self.width))
+    
+    def forward(self, x):
+        out = x
+        if self.bn_mode == "per_layer":
+            for layer, bn in zip(self.fc_module, self.bn_layers):
+                out = self.act(bn(layer(out)))
+        else:  # "per_block" or no BN
+            for layer in self.fc_module:
+                out = self.act(layer(out))
+        return out
+
+class DenseNetRegression(nn.Module):
+    """
+    DenseNet-style regression network.
+    
+    The network applies an initial projection to a fixed width, then uses a series of dense modules.
+    Each module's output is concatenated with its input, increasing feature dimensions, and then BN (if per_block) 
+    and dropout are applied per block. Finally, a linear layer maps the features to output targets.
+    
+    Config keys:
+      - "input_shape": input feature dimension.
+      - "width": width for initial projection and each module's output.
+      - "depth": number of dense modules.
+      - "skip_block_layers": number of linear layers per module.
+      - "n_targets": output dimension.
+      - "activation": activation function.
+      - "bn_mode": either "per_layer" or "per_block".
+      - "dropout_rate": dropout rate per block.
+    """
+    def __init__(self, config):
+        super(DenseNetRegression, self).__init__()
+        self.input_shape = config["input_shape"]
+        self.width = config["width"]
+        self.depth = config["depth"]
+        self.n_targets = config["n_targets"]
+        self.act = getActivation(config)
+        self.bn_mode = config.get("bn_mode", "per_layer")
+        self.dropout_rate = config.get("dropout_rate", 0.0)
+
+        # Input projection
+        self.input_layer = nn.Linear(self.input_shape, self.width)
+        
+        # Build dense modules.
+        modules = []
+        self.bn_blocks = nn.ModuleList() if self.bn_mode == "per_block" else None
+        self.dropouts = nn.ModuleList() if self.dropout_rate > 0 else None
+        current_features = self.width  # features after input projection
+        for _ in range(self.depth):
+            module = DenseModule(config, in_features=current_features)
+            modules.append(module)
+            current_features = current_features + self.width  # concat module output
+            if self.bn_mode == "per_block":
+                self.bn_blocks.append(nn.BatchNorm1d(current_features))
+            if self.dropout_rate > 0:
+                self.dropouts.append(nn.Dropout(self.dropout_rate))
+        self.dense_modules = nn.ModuleList(modules)
+        
+        # Final output layer
+        self.output_layer = nn.Linear(current_features, self.n_targets)
+    
+    def forward(self, x):
+        x = self.act(self.input_layer(x))
+        for i, module in enumerate(self.dense_modules):
+            new_features = module(x)
+            x = torch.cat([x, new_features], dim=1)
+            if self.bn_mode == "per_block":
+                x = self.act(self.bn_blocks[i](x))
+            if self.dropout_rate > 0:
+                x = self.dropouts[i](x)
+        x = self.output_layer(x)
+        return x
+
+
     
 def nets(config):
     """ the pytorch model builder
@@ -318,7 +513,10 @@ def nets(config):
         
         
     # save parameter counts
-    summary = pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)).rstrip().split('\n')
+    #summary = pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)).rstrip().split('\n')
+    dummy_input = torch.zeros((1, config["input_shape"])).to(get_device()).double().requires_grad_(True)
+    summary = pms.summary(regressor, dummy_input).rstrip().split('\n')
+
     config["trainable_parameters"] = int(summary[-3].replace(',', '')[18:])
     config["non_trainable_parameters"] = int(summary[-2].replace(',', '')[22:])
     config["total_parameters"] = int(summary[-4].replace(',', '')[14:])
