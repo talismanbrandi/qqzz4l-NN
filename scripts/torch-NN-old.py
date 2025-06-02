@@ -21,7 +21,6 @@ import argparse
 import pytorch_model_summary as pms
 
 from matplotlib import rc
-from supporting.nn_models import DenseModule, DenseNetRegression
 
 rc('text', usetex=False)
 # plt.rcParams['text.latex.preamble'] = []
@@ -465,8 +464,6 @@ def getActivation(config):
         return torch.nn.Tanh()
     if config["activation"] == 'prelu':
         return torch.nn.PReLU()
-    if config["activation"] == 'elu':
-        return torch.nn.ELU()
         
     
 class skip_dnn(torch.nn.Module):
@@ -558,9 +555,9 @@ class skip_light_module(torch.nn.Module):
         self.fc_module = torch.nn.ModuleList([torch.nn.Linear(self.width, self.width) 
                                               for i in range(self.skip_layer_depth)])
         # Apply Xavier (Glorot) normal initialization to layers of fc_module
-        for layer in self.fc_module:
-            torch.nn.init.xavier_normal_(layer.weight)
-            torch.nn.init.zeros_(layer.bias)
+        # for layer in self.fc_module:
+            # torch.nn.init.xavier_normal_(layer.weight)
+            # torch.nn.init.zeros_(layer.bias)
         
     def forward(self, x):
         y = x
@@ -586,8 +583,8 @@ class skip_light(torch.nn.Module):
         
         # input layer
         self.input = torch.nn.Linear(self.input_shape, self.width)
-        torch.nn.init.xavier_normal_(self.input.weight)  # Equivalent to 'glorot_normal'
-        torch.nn.init.zeros_(self.input.bias)  # Equivalent to 'zeros'
+        # torch.nn.init.xavier_normal_(self.input.weight)  # Equivalent to 'glorot_normal'
+        # torch.nn.init.zeros_(self.input.bias)  # Equivalent to 'zeros'
         self.act = getActivation(config)
         #skip blocks
         self.skip_core = torch.nn.Sequential(*[
@@ -596,104 +593,14 @@ class skip_light(torch.nn.Module):
         ])
         #output layer
         self.output = torch.nn.Linear(self.width, self.output_shape)
-        torch.nn.init.xavier_normal_(self.output.weight)  # Equivalent to 'glorot_normal'
-        torch.nn.init.zeros_(self.output.bias)  # Equivalent to 'zeros'
+        # torch.nn.init.xavier_normal_(self.output.weight)  # Equivalent to 'glorot_normal'
+        # torch.nn.init.zeros_(self.output.bias)  # Equivalent to 'zeros'
         
     def forward(self, x):
         x = self.act(self.input(x))
         x = self.skip_core(x)
         x = self.output(x)
         return x
-
-
-# class skip_light_module(torch.nn.Module):
-#     def __init__(self, config):
-#         super(skip_light_module, self).__init__()
-#         self.width = config["width"]
-#         self.skip_layer_depth = config["skip_block_layers"]
-#         self.act = getActivation(config)
-        
-#         self.fc_module = torch.nn.ModuleList([
-#             torch.nn.Linear(self.width, self.width) 
-#             for _ in range(self.skip_layer_depth)
-#         ])
-        
-#         self.dropout_rate = config.get("dropout_rate", 0.0)
-#         self.dropout = torch.nn.Dropout(self.dropout_rate) if self.dropout_rate > 0 else None
-        
-#         # Allow a "none" option to disable batch norm.
-#         self.bn_mode = config.get("bn_mode", None)
-#         if self.bn_mode == "per_layer":
-#             self.bn_layers = torch.nn.ModuleList([
-#                 torch.nn.BatchNorm1d(self.width)
-#                 for _ in range(self.skip_layer_depth)
-#             ])
-#         elif self.bn_mode == "per_block":
-#             self.bn_block = torch.nn.BatchNorm1d(self.width)
-#         elif self.bn_mode == None:
-#             # No batch norm is used.
-#             pass
-#         else:
-#             raise ValueError(f"Invalid bn_mode: {self.bn_mode}. Use 'per_layer', 'per_block', or 'None'.")
-    
-#     def forward(self, x):
-#         y = x
-#         if self.bn_mode == "per_layer":
-#             for layer, bn in zip(self.fc_module, self.bn_layers):
-#                 y = self.act(bn(layer(y)))
-#             y = y + x
-#         elif self.bn_mode == "per_block":
-#             for layer in self.fc_module:
-#                 y = self.act(layer(y))
-#             y = self.bn_block(y)
-#             y = y + x
-#         elif self.bn_mode == None:
-#             for layer in self.fc_module:
-#                 y = self.act(layer(y))
-#             y = y + x  # Residual cotorch.nnection is still applied.
-#         if self.dropout is not None:
-#             y = self.dropout(y)
-#         return y
-
-# class skip_light(torch.nn.Module):
-#     """
-#     Implementation of the skip network (a lighter version of skip_dtorch.nn).
-    
-#     Config keys used:
-#       - "input_shape": input feature dimension.
-#       - "width": width of hidden layers.
-#       - "depth": number of skip modules.
-#       - "skip_block_layers": number of layers per skip module.
-#       - "n_targets": number of output targets.
-#       - "activation": activation type (used by getActivation).
-#       - (Other keys like dropout_rate and bn_mode are passed down to skip_light_module.)
-#     """
-#     def __init__(self, config):
-#         super(skip_light, self).__init__()
-#         self.input_shape = config["input_shape"]
-#         self.width = config["width"]
-#         self.n_modules = config["depth"]
-#         self.output_shape = config["n_targets"]
-        
-#         # Input layer
-#         self.input = torch.nn.Linear(self.input_shape, self.width)
-#         self.act = getActivation(config)
-        
-#         # Skip blocks (each with its own dropout & batch normalization behavior)
-#         self.skip_core = torch.nn.Sequential(*[
-#             skip_light_module(config)
-#             for _ in range(self.n_modules)
-#         ])
-        
-#         # Output layer
-#         self.output = torch.nn.Linear(self.width, self.output_shape)
-        
-#     def forward(self, x):
-#         x = self.act(self.input(x))
-#         x = self.skip_core(x)
-#         x = self.output(x)
-#         return x
-
     
     
 def nets(config):
@@ -713,16 +620,12 @@ def nets(config):
         regressor = skip_dnn(skip_block, config, stream = True).double().to(get_device())
     elif config["model_type"] == 'skip-light':
         regressor = skip_light(config).double().to(get_device())
-    elif config["model_type"] == 'dense-net':
-        regressor = DenseNetRegression(config).double().to(get_device())
     else:
         logging.error(' '+config["model_type"]+' not implemented. model_type can be either dnn, skip or squeeze')
         
         
     # save parameter counts
-    #summary = pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)).rstrip().split('\n')
-    dummy_input = torch.zeros((1, config["input_shape"])).to(get_device()).double().requires_grad_(True)
-    summary = pms.summary(regressor, dummy_input).rstrip().split('\n')
+    summary = pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)).rstrip().split('\n')
     config["trainable_parameters"] = int(summary[-3].replace(',', '')[18:])
     config["non_trainable_parameters"] = int(summary[-2].replace(',', '')[22:])
     config["total_parameters"] = int(summary[-4].replace(',', '')[14:])
@@ -923,7 +826,7 @@ def test_model(model, test_data, config):
         test = df_pred.iloc[:,i].values
         pred = df_pred.iloc[:,i + 2 * num_vars].values
         config['test_metrics']['r2'][config['var_y'][i - base_length]] = metrics.r2_score(test, pred)*100
-        config['test_metrics']['abs_score'][config['var_y'][i - base_length]] = 100 - np.abs(df_pred.iloc[:,i + 4 * num_vars]).mean()
+        config['test_metrics']['abs_score'][config['var_y'][i - base_length]] = 100 - np.abs(df_pred.iloc[:,i + 4 * num_vars].mean())
     
     config['test_metrics']['r2']['model'] = r2_score
     config['test_metrics']['abs_score']['model'] = abs_score
@@ -1006,10 +909,7 @@ def runML(df, config):
     regressor = nets(config)
 
     # print the summary
-    #logging.info('\n' + pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)))
-    dummy_input = torch.zeros((1, config["input_shape"])).to(get_device()).double().requires_grad_(True)
-    summary = pms.summary(regressor, dummy_input).rstrip().split('\n')
-    logging.info('\n' + "\n".join(summary))
+    logging.info('\n' + pms.summary(regressor, torch.zeros((config["input_shape"],)).to(get_device()).double().clone().detach().requires_grad_(True)))
     
     # define the loss function
     if config['loss'] == 'mse':
@@ -1054,12 +954,6 @@ def runML(df, config):
                         optimizer=optimizer,
                         factor=1., 
                         total_iters=config["epochs"]
-                    )
-    elif config['lr_decay_type'] == 'cosine':
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer=optimizer,
-                        T_max=config['decay_steps'],
-                        eta_min=config["final_lr"]  # Minimum learning rate at the end
                     )
     else:
         raise ValueError('lr type not defined. Has to be exp or poly or const')
@@ -1169,7 +1063,6 @@ def runML(df, config):
 #############################
 
 def timediff(x):
-    
     """ a function to convert seconds to hh:mm:ss
         argument:
             x: time in seconds

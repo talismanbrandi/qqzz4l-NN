@@ -4,6 +4,7 @@
 #SBATCH --gres=gpu:v100-sxm2:1
 #SBATCH --time=08:00:00
 #SBATCH --job-name=m2_v100
+#SBATCH --mem=16G
 #SBATCH --ntasks=1
 #SBATCH --output=batch_scripts/run_logs/m2/model_2.%j.out
 #SBATCH --error=batch_scripts/run_logs/m2/model_2.%j.out

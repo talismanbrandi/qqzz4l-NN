@@ -317,7 +317,7 @@ class skip_light_module(nn.Module):
         self.dropout = nn.Dropout(self.dropout_rate) if self.dropout_rate > 0 else None
         
         # Allow a "none" option to disable batch norm.
-        self.bn_mode = config.get("bn_mode", "per_layer")
+        self.bn_mode = config.get("bn_mode", None)
         if self.bn_mode == "per_layer":
             self.bn_layers = nn.ModuleList([
                 nn.BatchNorm1d(self.width)
@@ -342,7 +342,7 @@ class skip_light_module(nn.Module):
                 y = self.act(layer(y))
             y = self.bn_block(y)
             y = y + x
-        elif self.bn_mode == "none":
+        elif self.bn_mode == None:
             for layer in self.fc_module:
                 y = self.act(layer(y))
             y = y + x  # Residual connection is still applied.

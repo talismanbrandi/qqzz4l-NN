@@ -9,7 +9,7 @@
         "y6"
     ],
     "activation": "leaky_relu",
-    "width": 31,
+    "width": 32,
     "depth": 10,
     "skip_block_layers": 5,
     "beta": 0,

@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:v100-sxm2:1
+#SBATCH --gres=gpu:h200:1
 #SBATCH --time=08:00:00
-#SBATCH --job-name=m5_v100
+#SBATCH --job-name=m5_h200
+#SBATCH --mem=16G
 #SBATCH --ntasks=1
 #SBATCH --output=batch_scripts/run_logs/m5/model_5.%j.out
 #SBATCH --error=batch_scripts/run_logs/m5/model_5.%j.out

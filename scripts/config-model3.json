@@ -8,9 +8,9 @@
         "y5",
         "y6"
     ],
-    "activation": "elu",
+    "activation": "leaky_relu",
     "width": 32,
-    "depth": 10,
+    "depth": 9,
     "skip_block_layers": 5,
     "beta": 0,
     "alpha": 0,
