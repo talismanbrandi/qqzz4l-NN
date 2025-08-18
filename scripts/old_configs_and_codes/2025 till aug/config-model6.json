@@ -5,11 +5,10 @@
     "data_dir": "/scratch/hakula/dataset",
     "seed": 42,
     "var_y": [
-        "y5",
-        "y6"
+        "y19",
+        "y20"
     ],
     "use_MC_sample": false,
-    "val_MC": true,
     "train-sample-size": 10000000,
     "validate-sample-size": 500000,
     "test-sample-size": 500000,
@@ -26,12 +25,9 @@
     "steps_per_epoch": 2400,
     "early_stopping_start_epoch": 150,
     "patience": 25,
-    "loss": "huber+mape",
+    "loss": "huber",
+    "gradient_clipping": true,
     "base_directory": "../models/",
     "epochs": 2000,
-    "model-uuid": "UUID",
-    "train-samples-used": 6,
-    "validate-samples-used": 6,
-    "test-samples-used": 6,
-    "n_targets": 2
+    "model-uuid": "UUID"
 }

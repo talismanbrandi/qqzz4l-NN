@@ -360,6 +360,7 @@ class EarlyStopping:
                 torch.save(model.state_dict(), self.m_path)
                 config['n_training_epochs'] = epoch
                 self.counter = 0
+                logging.info(f"New best loss obtained. Best loss: {self.min_validation_loss}")
             # increment everytime the loss does not go down and signal early stopping when the patience is crossed
             elif validation_loss > (self.min_validation_loss + self.min_delta):
                 self.counter += 1
@@ -1061,6 +1062,17 @@ def runML(df, config):
                         T_max=config['decay_steps'],
                         eta_min=config["final_lr"]  # Minimum learning rate at the end
                     )
+    elif config['lr_decay_type'] == 'plateau':
+        # reduce LR by a factor of `lr_factor` whenever <metric> has not improved for `lr_patience` epochs
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',                # assume you’re tracking accuracy; use 'min' if you track loss
+            factor=config['lr_factor'],# e.g. 0.1 → drops LR by 10x
+            patience=config['lr_patience'],  # e.g. wait 5 epochs of no improvement
+            threshold=config['lr_delta'],            # (optional) minimum change to count as “improvement”
+            min_lr=config['final_lr'], # floor for LR
+            verbose=True,              # prints a message whenever LR is reduced
+        )
     else:
         raise ValueError('lr type not defined. Has to be exp or poly or const')
         
@@ -1152,7 +1164,18 @@ def runML(df, config):
             regressor.load_state_dict(torch.load(model_path))
             
         # decay learning rate
-        scheduler.step()
+
+        if config['lr_decay_type'] == 'plateau':
+            # ReduceLROnPlateau expects the metric you’re monitoring.
+            # If you chose mode="max", pass val_acc. If you chose mode="min", pass val_loss.
+            scheduler.step(avg_vloss)
+        elif config['lr_decay_type'] == 'cosine':
+            if epoch < config["decay_steps"]:
+                scheduler.step()
+            elif epoch == config["decay_steps"]:
+                logging.info("lr will remain constant from now")
+        else:
+            scheduler.step()
         
         epoch += 1
 
