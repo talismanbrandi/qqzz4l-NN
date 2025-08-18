@@ -165,3 +165,4 @@ scripts/batch_scripts/run_logs/*
 
 # data
 qqzz4l-NN.data.tar.gz
+summarizing_codes/*.xlsx
