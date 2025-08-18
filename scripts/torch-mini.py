@@ -159,6 +159,11 @@ def oversample_below_y_threshold(
 
 df, spark = load_data(config)
 
+if config.get("use_MC_sample"):
+    print("Using MC data for Test set.")
+    if config.get("val_MC"):
+        print("Using MC data for Val set.")
+
 if "filter_y_threshold" in config:
     df = filter_by_y_threshold(df, threshold=config["filter_y_threshold"])
 
