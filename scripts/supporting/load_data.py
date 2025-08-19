@@ -76,10 +76,14 @@ def load_data(config):
         mc_suffix = ''
     
     # load eval and test set
-    df['validate'] = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+'validate'+mc_suffix+'/*.csv.*', header='true')
     
     df['test'] = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+'test'+mc_suffix+'/*.csv.*', header='true')
 
+    if config['use_MC_sample'] and config["val_MC"] == False:
+        mc_suffix = ''
+    
+    df['validate'] = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+'validate'+mc_suffix+'/*.csv.*', header='true')
+    
     logging.info(' data loaded into Spark session in {:.3f} seconds'.format(time.time() - start))
     
     # start the transfer the data to a pandas dataframe

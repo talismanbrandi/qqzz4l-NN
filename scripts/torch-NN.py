@@ -360,6 +360,7 @@ class EarlyStopping:
                 torch.save(model.state_dict(), self.m_path)
                 config['n_training_epochs'] = epoch
                 self.counter = 0
+                logging.info(f"New best loss obtained. Best loss: {self.min_validation_loss}")
             # increment everytime the loss does not go down and signal early stopping when the patience is crossed
             elif validation_loss > (self.min_validation_loss + self.min_delta):
                 self.counter += 1
@@ -1163,13 +1164,7 @@ def runML(df, config):
             regressor.load_state_dict(torch.load(model_path))
             
         # decay learning rate
-
-        if config['lr_decay_type'] == 'plateau':
-            # ReduceLROnPlateau expects the metric you’re monitoring.
-            # If you chose mode="max", pass val_acc. If you chose mode="min", pass val_loss.
-            scheduler.step(avg_vloss)
-        else:
-            scheduler.step()
+        scheduler.step()
         
         epoch += 1
 
