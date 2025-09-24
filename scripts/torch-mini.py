@@ -56,7 +56,8 @@ config = {
     # "verbose": 1,
     "base_directory": "../models/",
     "epochs": 2000,
-    "model-uuid": "UUID"
+    "model-uuid": "UUID",
+    "device_id": 0
 }
 
 parser = argparse.ArgumentParser(description="A torch implementation of high-precision regressors",
@@ -68,7 +69,9 @@ args = vars(parser.parse_args())
 with open(args['config'], 'r') as f:
     config = json.load(f)
 
-
+device_id = config.get("device_id", 0)
+if torch.cuda.is_available():
+    print(f"using device {device_id}")
 
 torch.manual_seed(config['seed'])
 torch.set_default_dtype(torch.float64)
@@ -223,7 +226,7 @@ def get_device():
     ''' function to get the device the NN is running on, CPU or GPU
     '''
     if torch.cuda.is_available():
-        device = torch.device("cuda:0")
+        device = torch.device(f"cuda:{device_id}")
     else: 
         device = torch.device("cpu")
         
@@ -338,8 +341,11 @@ def get_loss_function(name: str, **kwargs) -> nn.Module:
         beta = kwargs.get("beta", 1.0)
         huber = nn.HuberLoss(delta=delta)
         return lambda pred, target: alpha * huber(pred, target) + beta * (torch.abs(pred - target) / (torch.abs(target) + eps)).mean()
+    if name == "mape":
+        eps = kwargs.get("eps", 1e-8)
+        return lambda pred, target: (torch.abs(pred - target) / (torch.abs(target) + eps)).mean()
 
-    raise ValueError("name must be 'mse', 'smape', or 'huber'")
+    raise ValueError("name must be 'mse', 'mape', 'smape', or 'huber'")
 
 if "monitor" in config:
     if config["monitor"] == "smape":
@@ -396,11 +402,16 @@ class SkipModel(nn.Module):
 
 # Scheduler helper
 def get_scheduler(optimizer, scheduler_type, steps_per_epoch, config):
-    if scheduler_type == "exponential":
+    if scheduler_type == "lambda_exp":
         decay_rate = config["decay_rate"]
         decay_steps = config["decay_steps"]
         lr_lambda = lambda epoch: decay_rate ** (epoch / decay_steps)
         return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    
+    elif scheduler_type == "exponential":
+        # Standard ExponentialLR
+        gamma = config.get("lr_gamma", 0.95)  # default if not provided
+        return optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     elif scheduler_type == "plateau":
         scheduler_args = {
@@ -422,78 +433,155 @@ def get_scheduler(optimizer, scheduler_type, steps_per_epoch, config):
 
 # Training loop
 
+import os
+import shutil
+import torch
+import numpy as np
+from datetime import datetime
+from sklearn.metrics import r2_score, mean_absolute_percentage_error
+
+
+def save_checkpoint(output_dir, uuid_str, epoch, model, optimizer, scheduler,
+                    best_val_loss, epochs_since_improvement, train_losses, val_losses):
+    """Helper to save checkpoint with all states."""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'best_val_loss': best_val_loss,
+        'epochs_since_improvement': epochs_since_improvement,
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+    }
+    latest_path = os.path.join(output_dir, f"{uuid_str}.latest.pt")
+    torch.save(checkpoint, latest_path)
+
+
+def load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, config, uuid_str):
+    """Load checkpoint if available. If keys are missing, fall back to config/defaults."""
+    latest_path = None
+    for f in os.listdir(checkpoint_dir):
+        if f.endswith(".latest.pt"):
+            latest_path = os.path.join(checkpoint_dir, f)
+            break
+
+    if latest_path is None:
+        # raise FileNotFoundError("No .latest.pt file found in checkpoint_dir")
+        print("No checkpoint found. Starting training from scratch...")
+        return 0, float('inf'), 0, [], []
+
+    checkpoint = torch.load(latest_path, map_location="cpu")
+    print(f"Loaded checkpoint from {latest_path}. Keys: {list(checkpoint.keys())}")
+
+    # Restore states
+    model.load_state_dict(checkpoint.get('model_state_dict', model.state_dict()))
+    optimizer.load_state_dict(checkpoint.get('optimizer_state_dict', optimizer.state_dict()))
+    scheduler.load_state_dict(checkpoint.get('scheduler_state_dict', scheduler.state_dict()))
+
+    # Restore variables or use defaults
+    start_epoch = checkpoint.get('epoch', 0) + 1
+    best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+    epochs_since_improvement = checkpoint.get('epochs_since_improvement', 0)
+    train_losses = checkpoint.get('train_losses', [])
+    val_losses = checkpoint.get('val_losses', [])
+
+    # Copy best weights if exist
+    best_weights_src = None
+    for f in os.listdir(checkpoint_dir):
+        if f.endswith(".best_weights.pt"):
+            best_weights_src = os.path.join(checkpoint_dir, f)
+            break
+    if best_weights_src:
+        dst = os.path.join(output_dir, f"{uuid_str}.best_weights.pt")
+        try:
+            shutil.copy(best_weights_src, dst)
+            print(f"Copied best weights to {dst}")
+        except shutil.SameFileError:
+            print("Best weights already exist at destination. Skipping copy.")
+        except Exception as e:
+            print(f"Skipping best weights copy due to error: {e}")
+    return start_epoch, best_val_loss, epochs_since_improvement, train_losses, val_losses
+
+
 def run_training(model, train_loader, val_loader, config, optimizer, scheduler, output_dir, uuid_str):
     device = get_device()
     model.to(device)
 
-    criterion = get_loss_function(config['loss']) #nn.MSELoss()
+    criterion = get_loss_function(config['loss'], **config.get("loss_params", {}))
+
     best_val_loss = float('inf')
     epochs_since_improvement = 0
+    start_epoch = 0
+    train_losses, val_losses = [], []
 
-    for epoch in range(config['epochs']):
+    # Load checkpoint if path provided
+    if "load_checkpoint_path" in config:
+        checkpoint_dir = config["load_checkpoint_path"]
+        if os.path.exists(checkpoint_dir):
+            start_epoch, best_val_loss, epochs_since_improvement, train_losses, val_losses = \
+                load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, config, uuid_str)
+        else:
+            raise Exception(" The provided checkpoint path does not exist!")
+
+    # Training loop
+    for epoch in range(start_epoch, config['epochs']):
         model.train()
-        train_losses = []
+        batch_train_losses = []
 
-        #print(f"Training epoch: {epoch}...")
-        #for xb, yb in tqdm(train_loader):
-
-        for xb, yb in (train_loader):
+        for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
             loss = criterion(pred, yb)
             loss.backward()
-            if "gradient_clipping" in config:
-                if config["gradient_clipping"] == True:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if config.get("gradient_clipping", False):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            train_losses.append(loss.item())
+            batch_train_losses.append(loss.item())
 
         # Validation
         model.eval()
-        val_losses, mapes, r2s = [], [], []
+        batch_val_losses, mapes, r2s = [], [], []
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
                 vloss = criterion(pred, yb)
-                val_losses.append(vloss.item())
+                batch_val_losses.append(vloss.item())
                 mapes.append(mean_absolute_percentage_error(yb.cpu(), pred.cpu()))
                 r2s.append(r2_score(yb.cpu(), pred.cpu()))
 
-        avg_train = np.mean(train_losses)
-        avg_val = np.mean(val_losses)
+        avg_train = np.mean(batch_train_losses)
+        avg_val = np.mean(batch_val_losses)
         avg_mape = np.mean(mapes)
-        abs_score = (1 - avg_mape) * 100
         avg_r2 = np.mean(r2s)
+        abs_score = (1 - avg_mape) * 100
         lr = optimizer.param_groups[0]['lr']
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        print(f"[{now}] Epoch {epoch} | LR: {lr:.5e} | Train {config['loss'].upper()}: {avg_train:.6f} | Val {config['loss'].upper()}: {avg_val:.6f} | Val MAPE: {avg_mape:.6f} | Val R2: {avg_r2:.6f} | abs_score: {abs_score:.4f}")
+        print(f"[{now}] Epoch {epoch} | LR: {lr:.5e} | Train {config['loss'].upper()}: {avg_train:.6f} | "
+              f"Val {config['loss'].upper()}: {avg_val:.6f} | Val MAPE: {avg_mape:.6f} | "
+              f"Val R2: {avg_r2:.6f} | abs_score: {abs_score:.4f}")
 
+        # Scheduler update
         if config['lr_decay_type'] == 'plateau':
             scheduler.step(avg_val)
         else:
             scheduler.step()
 
-        # Save checkpoint every epoch
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-        }
-        torch.save(checkpoint, os.path.join(output_dir, f"{uuid_str}.latest.pt"))
+        # Append losses to history
+        train_losses.append(avg_train)
+        val_losses.append(avg_val)
 
-        # Save best model
-        if avg_val < best_val_loss:
-            best_val_loss = avg_val
-            torch.save(model.state_dict(), os.path.join(output_dir, f"{uuid_str}.best_weights.pt"))
-            print(f"New best model saved at epoch {epoch} with Val {config['loss'].upper()}: {best_val_loss:.6f}")
+        # Save checkpoint
+        save_checkpoint(output_dir, uuid_str, epoch, model, optimizer, scheduler,
+                        best_val_loss, epochs_since_improvement, train_losses, val_losses)
 
-
+        # Early stopping
+        improved = avg_val < (best_val_loss - 1e-12)
         if epoch >= config['early_stopping_start_epoch']:
-            if avg_val < best_val_loss:
+            if improved:
                 epochs_since_improvement = 0
             else:
                 epochs_since_improvement += 1
@@ -501,44 +589,10 @@ def run_training(model, train_loader, val_loader, config, optimizer, scheduler, 
                     print("Early stopping triggered.")
                     break
 
-
-# def evaluate_model(model, dataloader, device, output_dir):
-#     model.eval()
-#     all_preds, all_targets = [], []
-#     with torch.no_grad():
-#         for xb, yb in (dataloader):
-#             xb = xb.to(device)
-#             pred = model(xb).cpu()
-#             all_preds.append(pred)
-#             all_targets.append(yb.cpu())
-
-#     y_true = torch.cat(all_targets, dim=0).numpy()
-#     y_pred = torch.cat(all_preds, dim=0).numpy()
-
-#     overall_mape = mean_absolute_percentage_error(y_true, y_pred)
-#     overall_r2 = r2_score(y_true, y_pred)
-#     abs_score = (1 - overall_mape) * 100
-
-#     print("\n=== Evaluation ===")
-#     print(f"Overall MAPE      : {overall_mape:.6f}")
-#     print(f"Overall R2        : {overall_r2:.6f}")
-#     print(f"Overall abs_score : {abs_score:.4f}")
-    
-#     for i in range(y_true.shape[1]):
-#         mape_i = mean_absolute_percentage_error(y_true[:, i], y_pred[:, i])
-#         r2_i = r2_score(y_true[:, i], y_pred[:, i])
-#         abs_score_i = (1 - mape_i) * 100
-#         print(f"Y[{i}] - MAPE: {mape_i:.6f} | R2: {r2_i:.6f} | abs_score: {abs_score_i:.4f}")
-
-#     with open(os.path.join(output_dir, "metrics.txt"), "w") as f:
-#         f.write(f"Overall MAPE      : {overall_mape:.6f}\n")
-#         f.write(f"Overall R2        : {overall_r2:.6f}\n")
-#         f.write(f"Overall abs_score : {abs_score:.4f}\n")
-#         for i in range(y_true.shape[1]):
-#             mape_i = mean_absolute_percentage_error(y_true[:, i], y_pred[:, i])
-#             r2_i = r2_score(y_true[:, i], y_pred[:, i])
-#             abs_score_i = (1 - mape_i) * 100
-#             f.write(f"Y[{i}] - MAPE: {mape_i:.6f} | R2: {r2_i:.6f} | abs_score: {abs_score_i:.4f}\n")
+        if improved:
+            best_val_loss = avg_val
+            torch.save(model.state_dict(), os.path.join(output_dir, f"{uuid_str}.best_weights.pt"))
+            print(f"New best model saved at epoch {epoch} with Val {config['loss'].upper()}: {best_val_loss:.6f}")
 
 
 import os, json
@@ -581,6 +635,70 @@ def _save_error_plots_from_arrays(delta_matrix, labels, out_path, cutoff=5):
     plt.tight_layout()
     plt.savefig(out_path)
     plt.close()
+
+def plot_losses_from_output_dir(output_dir, title="Training vs Validation Loss"):
+    """
+    Load the *.latest.pt checkpoint from an output directory,
+    plot train/val loss curves, and save them as:
+      - loss_plot.png        (linear scale)
+      - loss_plot_loglog.png (log-log scale)
+    """
+    # Find latest.pt file
+    latest_ckpt = None
+    for f in os.listdir(output_dir):
+        if f.endswith(".latest.pt"):
+            latest_ckpt = os.path.join(output_dir, f)
+            break
+
+    if latest_ckpt is None:
+        raise FileNotFoundError(f"No .latest.pt file found in {output_dir}")
+
+    # Load checkpoint
+    checkpoint = torch.load(latest_ckpt, map_location="cpu")
+    print(f"Loaded checkpoint: {latest_ckpt}")
+    print(f"Available keys: {list(checkpoint.keys())}")
+
+    train_losses = checkpoint.get("train_losses", [])
+    val_losses = checkpoint.get("val_losses", [])
+
+    if not train_losses or not val_losses:
+        print("No loss history found in checkpoint.")
+        return
+
+    # -------- Linear scale plot --------
+    plt.figure(figsize=(8, 5))
+    plt.plot(train_losses, label="Train Loss", marker="o")
+    plt.plot(val_losses, label="Validation Loss", marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6)
+
+    save_path = os.path.join(output_dir, "loss_plot.png")
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.show()
+    print(f"Saved loss plot to: {save_path}")
+
+    # -------- Log-log scale plot --------
+    plt.figure(figsize=(8, 5))
+    plt.plot(train_losses, label="Train Loss", marker="o")
+    plt.plot(val_losses, label="Validation Loss", marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(title + " (Log-Log Scale)")
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.legend()
+    plt.grid(True, which="both", linestyle="--", alpha=0.6)
+
+    save_path_log = os.path.join(output_dir, "loss_plot_loglog.png")
+    plt.savefig(save_path_log, dpi=200, bbox_inches="tight")
+    plt.show()
+    print(f"Saved log-log loss plot to: {save_path_log}")
+
+    return train_losses, val_losses
+
 
 def evaluate_model(model, dataloader, device, output_dir, config):
     """
@@ -675,6 +793,9 @@ def evaluate_model(model, dataloader, device, output_dir, config):
     print("Saved histograms to:",
           os.path.join(output_dir, "hist_unscaled_overlay.png"), "and",
           os.path.join(output_dir, "hist_scaled_overlay.png"))
+    
+    plot_losses_from_output_dir(output_dir)
+
 
 
 if config["model-uuid"] == "UUID":
@@ -717,10 +838,9 @@ run_training(model, train_loader, val_loader, config, optimizer, scheduler, outp
 # Load best model weights before test set evaluation
 print("Loading best weights for evaluation...")
 best_weights_path = os.path.join(output_dir, f"{uuid_str}.best_weights.pt")
-model.load_state_dict(torch.load(best_weights_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+model.load_state_dict(torch.load(best_weights_path, map_location=get_device()))
 
 print("Running evaluation...")
-evaluate_model(model, test_loader, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), output_dir=output_dir)
-
+evaluate_model(model, test_loader, device=get_device(), output_dir=output_dir, config=config)
 
 
