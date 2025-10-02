@@ -23,7 +23,7 @@
     "batch_size": 1024,
     "steps_per_epoch": 2400,
     "early_stopping_start_epoch": 200,
-    "patience": 150,
+    "patience": 250,
     "loss": "huber",
     "base_directory": "../models/",
     "epochs": 2000,

@@ -412,6 +412,19 @@ def get_scheduler(optimizer, scheduler_type, steps_per_epoch, config):
         # Standard ExponentialLR
         gamma = config.get("lr_gamma", 0.95)  # default if not provided
         return optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
+    
+    elif scheduler_type == "flat_exp":
+        # Custom: flat LR for warm_epochs, then exponential decay
+        warm_epochs = config.get("warm_epochs", 10)
+        gamma = config.get("lr_gamma", 0.95)
+
+        def lr_lambda(epoch):
+            if epoch < warm_epochs:
+                return 1.0
+            else:
+                return gamma ** (epoch - warm_epochs)
+
+        return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     elif scheduler_type == "plateau":
         scheduler_args = {
