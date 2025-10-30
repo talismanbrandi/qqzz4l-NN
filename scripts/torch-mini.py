@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from glob import glob
 from sys import exit
 import argparse
@@ -13,68 +14,12 @@ import os
 from sklearn.metrics import mean_absolute_percentage_error, r2_score
 from datetime import datetime
 import uuid
-from supporting.load_data import load_data, build_data_loaders, x_scale, y_scale, y_unscale
 from tqdm import tqdm
 import json
 import pytorch_model_summary as pms
-import argparse
-import json
+import shutil
+from supporting.load_data import load_data, build_data_loaders, x_scale, y_scale, y_unscale
 
-config = {
-    "model_type": "skip-mini",
-    "input_shape": 4,
-    "amplitude_shape": 36,
-    "data_dir": "/scratch/hakula/dataset",
-    "seed": 42,
-    "var_y": 'all',
-    "use_MC_sample": False,
-    "val_MC": True,
-    "train-sample-size": 10_000_000,
-    "validate-sample-size": 500_000,
-    "test-sample-size": 500_000,
-    "activation": "leaky_relu",
-    "width": 160,
-    "depth": 16,
-    "skip_block_layers": 6,
-    # "beta": 0,
-    # "alpha": 0,
-    # "normal_scaled": False,
-    "lr_decay_type": "plateau",
-    "initial_lr": 0.001,
-    # "final_lr": 1e-6,
-    "lr_patience": 25,
-    "lr_factor": 0.8,
-    "lr_delta": 7e-5,
-    # "decay_steps": 200,
-    "batch_size": 2048,
-    "steps_per_epoch": 2400,
-    "early_stopping_start_epoch": 100,
-    "patience": 40,
-    # "monitor": "val_mse",
-    "loss": "huber",
-    "gradient_clipping": True,
-    # "verbose": 1,
-    "base_directory": "../models/",
-    "epochs": 2000,
-    "model-uuid": "UUID",
-    "device_id": 0
-}
-
-parser = argparse.ArgumentParser(description="A torch implementation of high-precision regressors",
-                                    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument("config", help="configuration file for the run")
-args = vars(parser.parse_args())
-
-# set up the config
-with open(args['config'], 'r') as f:
-    config = json.load(f)
-
-device_id = config.get("device_id", 0)
-if torch.cuda.is_available():
-    print(f"using device {device_id}")
-
-torch.manual_seed(config['seed'])
-torch.set_default_dtype(torch.float64)
 
 def filter_by_y_threshold(dfs, threshold=1e-4, prefix='y', mode='all', verbose=True):
     """
@@ -160,36 +105,6 @@ def oversample_below_y_threshold(
     return oversampled
 
 
-df, spark = load_data(config)
-
-if config.get("use_MC_sample"):
-    print("Using MC data for Test set.")
-    if config.get("val_MC"):
-        print("Using MC data for Val set.")
-
-if "filter_y_threshold" in config:
-    df = filter_by_y_threshold(df, threshold=config["filter_y_threshold"])
-
-if "oversample_below_threshold" in config:
-    df = oversample_below_y_threshold(
-        df,
-        threshold=1e-4,
-        prefix='y',
-        mode='any',     # or 'all' if you want stricter logic
-        factor=8,       # add as many duplicates as you want
-        random_state=42
-    )
-
-
-x_cols = ['x1', 'x2', 'x3', 'x4']
-y_cols = config["var_y"]
-x_train = df["train"][x_cols]
-y_train = df["train"][y_cols]
-x_val = df["validate"][x_cols]
-y_val = df["validate"][y_cols]
-x_test = df["test"][x_cols]
-y_test = df["test"][y_cols]
-
 def x_scale(x, p=7.5):
     ''' function for scaling x1
         argument:
@@ -200,7 +115,6 @@ def x_scale(x, p=7.5):
     '''
     return 1/p * np.log(1 + x * (np.exp(p) - 1))
                         
-    
 def y_scale(y):
     ''' function for scaling y1
         argument:
@@ -220,8 +134,6 @@ def y_unscale(y):
     '''
     return np.exp(y) - 1 if y >= 0 else 1 - np.exp(-y)
 
-
-
 def get_device():
     ''' function to get the device the NN is running on, CPU or GPU
     '''
@@ -231,7 +143,6 @@ def get_device():
         device = torch.device("cpu")
         
     return device
-
 
 class MyDataset(torch.utils.data.Dataset):
     '''Class to convert dataframe to torch tensor'''
@@ -258,8 +169,6 @@ class MyDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
 
-
-
 def get_activation(activation_str):
     if activation_str == 'leaky_relu':
         return nn.LeakyReLU()
@@ -277,6 +186,8 @@ def get_activation(activation_str):
         return nn.PReLU()
     if activation_str == 'elu':
         return nn.ELU()
+    else:
+        raise ValueError(f"Unknown activation: {activation_str}")
     
 class SMAPELoss(nn.Module):
     """
@@ -291,11 +202,6 @@ class SMAPELoss(nn.Module):
         scale = (y_pred.abs() + y_true.abs()).clamp(min=self.eps)  # avoid /0
         return torch.mean(diff / scale)
 
-# this version is for monitoring performance, not for loss optimization
-# def smape(pred, target, eps=1e-8):
-#     numerator = torch.abs(pred - target)
-#     denominator = (torch.abs(pred) + torch.abs(target)) / 2.0 + eps
-#     return (numerator / denominator).mean()
 def smape(pred, target, eps=1e-8):
     """
     SMAPE function that works for both PyTorch tensors and NumPy arrays.
@@ -347,24 +253,6 @@ def get_loss_function(name: str, **kwargs) -> nn.Module:
 
     raise ValueError("name must be 'mse', 'mape', 'smape', or 'huber'")
 
-if "monitor" in config:
-    if config["monitor"] == "smape":
-        mean_absolute_percentage_error = smape
-
-train_dataset = MyDataset(x_train, y_train, config)
-val_dataset   = MyDataset(x_val, y_val, config)
-test_dataset  = MyDataset(x_test, y_test, config)
-
-# load the data into torch tensor batches
-batch_size = config["batch_size"]
-numworkers = 4 if get_device().type == 'cpu' else 0
-
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=numworkers, drop_last=True)
-val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=numworkers, drop_last=True)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=numworkers, drop_last=True)
-
-        
-
 # Residual module (equivalent to 'module' in Keras)
 class ResidualBlock(nn.Module):
     def __init__(self, in_dim, width, n_skip_layers, activation='swish'):
@@ -398,7 +286,6 @@ class SkipModel(nn.Module):
         x = self.input_layer(x)
         x = self.res_blocks(x)
         return self.output_layer(x)
-
 
 # Scheduler helper
 def get_scheduler(optimizer, scheduler_type, steps_per_epoch, config):
@@ -444,15 +331,7 @@ def get_scheduler(optimizer, scheduler_type, steps_per_epoch, config):
     else:
         raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
-# Training loop
-
-import os
-import shutil
-import torch
-import numpy as np
-from datetime import datetime
-from sklearn.metrics import r2_score, mean_absolute_percentage_error
-
+# Training helpers
 
 def save_checkpoint(output_dir, uuid_str, epoch, model, optimizer, scheduler,
                     best_val_loss, epochs_since_improvement, train_losses, val_losses):
@@ -469,7 +348,6 @@ def save_checkpoint(output_dir, uuid_str, epoch, model, optimizer, scheduler,
     }
     latest_path = os.path.join(output_dir, f"{uuid_str}.latest.pt")
     torch.save(checkpoint, latest_path)
-
 
 def load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, config, uuid_str):
     """Load checkpoint if available. If keys are missing, fall back to config/defaults."""
@@ -515,7 +393,6 @@ def load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, con
         except Exception as e:
             print(f"Skipping best weights copy due to error: {e}")
     return start_epoch, best_val_loss, epochs_since_improvement, train_losses, val_losses
-
 
 def run_training(model, train_loader, val_loader, config, optimizer, scheduler, output_dir, uuid_str):
     device = get_device()
@@ -607,12 +484,6 @@ def run_training(model, train_loader, val_loader, config, optimizer, scheduler, 
             torch.save(model.state_dict(), os.path.join(output_dir, f"{uuid_str}.best_weights.pt"))
             print(f"New best model saved at epoch {epoch} with Val {config['loss'].upper()}: {best_val_loss:.6f}")
 
-
-import os, json
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.metrics import mean_absolute_percentage_error, r2_score
 
 # def _safe_mape(y, yhat):
 #     mask = np.abs(y) > 1e-12
@@ -712,7 +583,6 @@ def plot_losses_from_output_dir(output_dir, title="Training vs Validation Loss")
 
     return train_losses, val_losses
 
-
 def evaluate_model(model, dataloader, device, output_dir, config):
     """
     Evaluate a trained model and save:
@@ -809,51 +679,128 @@ def evaluate_model(model, dataloader, device, output_dir, config):
     
     plot_losses_from_output_dir(output_dir)
 
+#############################
+# main
+#############################
+    
+def main():
+    
+    # logging.basicConfig(stream=sys.stdout, format='%(asctime)s %(levelname)s:%(message)s', level=logging.INFO, datefmt='%I:%M:%S')
+
+    # load config
+    parser = argparse.ArgumentParser(description="A torch implementation of high-precision regressors",
+                                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("config", help="configuration file for the run")
+    args = vars(parser.parse_args())
+
+    # set up the config
+    with open(args['config'], 'r') as f:
+        config = json.load(f)
+    
+    # device id and seed
+    global device_id
+    device_id = config.get("device_id", 0)
+    if torch.cuda.is_available():
+        print(f"using device {device_id}")
+
+    torch.manual_seed(config['seed'])
+    torch.set_default_dtype(torch.float64)
+
+    # load data and preprocess
+    df, spark = load_data(config)
+
+    if config.get("use_MC_sample"):
+        print("Using MC data for Test set.")
+        if config.get("val_MC"):
+            print("Using MC data for Val set.")
+
+    if "filter_y_threshold" in config:
+        df = filter_by_y_threshold(df, threshold=config["filter_y_threshold"])
+
+    if "oversample_below_threshold" in config:
+        df = oversample_below_y_threshold(
+            df,
+            threshold=1e-4,
+            prefix='y',
+            mode='any',     # or 'all' if you want stricter logic
+            factor=8,       # add as many duplicates as you want
+            random_state=42
+        )
+
+    x_cols = ['x1', 'x2', 'x3', 'x4']
+    y_cols = config["var_y"]
+    x_train = df["train"][x_cols]
+    y_train = df["train"][y_cols]
+    x_val = df["validate"][x_cols]
+    y_val = df["validate"][y_cols]
+    x_test = df["test"][x_cols]
+    y_test = df["test"][y_cols]
+
+    train_dataset = MyDataset(x_train, y_train, config)
+    val_dataset   = MyDataset(x_val, y_val, config)
+    test_dataset  = MyDataset(x_test, y_test, config)
+
+    # metric monitoring with smape
+    if "monitor" in config:
+        if config["monitor"] == "smape":
+            global mean_absolute_percentage_error
+            mean_absolute_percentage_error = smape
+
+    # load the data into torch tensor batches
+    batch_size = config["batch_size"]
+    numworkers = 4 if get_device().type == 'cpu' else 0
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=numworkers, drop_last=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=numworkers, drop_last=True)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=numworkers, drop_last=True)
+
+    # create unique id for the model
+    if config["model-uuid"] == "UUID":
+        uuid_str = str(uuid.uuid4())[:8]
+    else:
+        uuid_str = config["model-uuid"]
+
+    # model params
+    width = config['width']
+    depth = config['depth']
+    n_skip_layers = config['skip_block_layers']
+    activation = config['activation']
+
+    # create model and print summary
+    model = SkipModel(config["input_shape"], width, depth, n_skip_layers, len(y_cols), activation)
+    model.to(get_device())
+    dummy_input = torch.zeros((1, config["input_shape"])).to(get_device()).double().requires_grad_(True)
+    summary = pms.summary(model, dummy_input).rstrip().split('\n')
+    print('\n' + "\n".join(summary))
+
+    # create optimizer and schedyker
+    optimizer = optim.Adam(model.parameters(), lr=config['initial_lr'])
+    scheduler = get_scheduler(optimizer, config['lr_decay_type'], config['steps_per_epoch'], config)
+
+    # create output dir if it doesn't exist
+    output_dir = os.path.join(config['base_directory'], f"{config['model_type']}_{uuid_str}_{config['width']}_{config['depth']}_{config['skip_block_layers']}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save config dictionary to output directory
+    with open(os.path.join(output_dir, "config.json"), "w") as f:
+        json.dump(config, f, indent=4)
+
+    print(f"Starting training for model: {uuid_str}")
+    run_training(model, train_loader, val_loader, config, optimizer, scheduler, output_dir, uuid_str)
+
+    # Load best model weights before test set evaluation
+    print("Loading best weights for evaluation...")
+    best_weights_path = os.path.join(output_dir, f"{uuid_str}.best_weights.pt")
+    model.load_state_dict(torch.load(best_weights_path, map_location=get_device()))
+
+    print("Running evaluation...")
+    evaluate_model(model, test_loader, device=get_device(), output_dir=output_dir, config=config)
 
 
-if config["model-uuid"] == "UUID":
-    uuid_str = str(uuid.uuid4())[:8]
-else:
-    uuid_str = config["model-uuid"]
+    ################## END ######################
+    print('Stopping Spark session')
+    spark.stop()
 
-# model params
-width = config['width']
-depth = config['depth']
-n_skip_layers = config['skip_block_layers']
-activation = config['activation']
-
-# training params
-steps_per_epoch = config['steps_per_epoch']
-max_epochs = config['epochs']
-every_n_epochs = 250
-patience = config['patience']
-early_stop_start = config['early_stopping_start_epoch']
-
-model = SkipModel(config["input_shape"], width, depth, n_skip_layers, len(y_cols), activation)
-model.to(get_device())
-dummy_input = torch.zeros((1, config["input_shape"])).to(get_device()).double().requires_grad_(True)
-summary = pms.summary(model, dummy_input).rstrip().split('\n')
-print('\n' + "\n".join(summary))
-
-
-optimizer = optim.Adam(model.parameters(), lr=config['initial_lr'])
-scheduler = get_scheduler(optimizer, config['lr_decay_type'], config['steps_per_epoch'], config)
-
-output_dir = os.path.join(config['base_directory'], f"{config['model_type']}_{uuid_str}_{config['width']}_{config['depth']}_{config['skip_block_layers']}")
-os.makedirs(output_dir, exist_ok=True)
-# Save config dictionary to output directory
-with open(os.path.join(output_dir, "config.json"), "w") as f:
-    json.dump(config, f, indent=4)
-
-print(f"Starting training for model: {uuid_str}")
-run_training(model, train_loader, val_loader, config, optimizer, scheduler, output_dir, uuid_str)
-
-# Load best model weights before test set evaluation
-print("Loading best weights for evaluation...")
-best_weights_path = os.path.join(output_dir, f"{uuid_str}.best_weights.pt")
-model.load_state_dict(torch.load(best_weights_path, map_location=get_device()))
-
-print("Running evaluation...")
-evaluate_model(model, test_loader, device=get_device(), output_dir=output_dir, config=config)
-
-
+if __name__ == "__main__":
+    # execute only if run as a script
+    main()
