@@ -757,6 +757,9 @@ def main():
     # create unique id for the model
     if config["model-uuid"] == "UUID":
         uuid_str = str(uuid.uuid4())[:8]
+        # config["model-uuid"] = uuid_str
+        # with open(args['config'], 'w') as f:
+        #     json.dump(config, f, indent=2)
     else:
         uuid_str = config["model-uuid"]
 
