@@ -19,6 +19,10 @@ import json
 import pytorch_model_summary as pms
 import shutil
 from supporting.load_data import load_data, build_data_loaders, x_scale, y_scale, y_unscale
+import mlflow
+import mlflow
+import mlflow.pytorch
+from mlflow.models import infer_signature
 
 
 def filter_by_y_threshold(dfs, threshold=1e-4, prefix='y', mode='all', verbose=True):
@@ -334,7 +338,8 @@ def get_scheduler(optimizer, scheduler_type, steps_per_epoch, config):
 # Training helpers
 
 def save_checkpoint(output_dir, uuid_str, epoch, model, optimizer, scheduler,
-                    best_val_loss, epochs_since_improvement, train_losses, val_losses):
+                    best_val_loss, epochs_since_improvement, train_losses, val_losses, 
+                    val_mapes, val_r2s, val_abs_scores):
     """Helper to save checkpoint with all states."""
     checkpoint = {
         'epoch': epoch,
@@ -345,6 +350,9 @@ def save_checkpoint(output_dir, uuid_str, epoch, model, optimizer, scheduler,
         'epochs_since_improvement': epochs_since_improvement,
         'train_losses': train_losses,
         'val_losses': val_losses,
+        "val_mapes": val_mapes,
+        "val_r2s": val_r2s,
+        "val_abs_scores": val_abs_scores,
     }
     latest_path = os.path.join(output_dir, f"{uuid_str}.latest.pt")
     torch.save(checkpoint, latest_path)
@@ -360,7 +368,10 @@ def load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, con
     if latest_path is None:
         # raise FileNotFoundError("No .latest.pt file found in checkpoint_dir")
         print("No checkpoint found. Starting training from scratch...")
-        return 0, float('inf'), 0, [], []
+        return (0, float('inf'), 0,
+        [], [],  # train_losses, val_losses
+        [], [], [])  # val_mapes, val_r2s, val_abs_scores
+
 
     checkpoint = torch.load(latest_path, map_location="cpu")
     print(f"Loaded checkpoint from {latest_path}. Keys: {list(checkpoint.keys())}")
@@ -376,6 +387,10 @@ def load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, con
     epochs_since_improvement = checkpoint.get('epochs_since_improvement', 0)
     train_losses = checkpoint.get('train_losses', [])
     val_losses = checkpoint.get('val_losses', [])
+    val_mapes      = checkpoint.get("val_mapes", [])
+    val_r2s        = checkpoint.get("val_r2s", [])
+    val_abs_scores = checkpoint.get("val_abs_scores", [])
+
 
     # Copy best weights if exist
     best_weights_src = None
@@ -392,7 +407,9 @@ def load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, con
             print("Best weights already exist at destination. Skipping copy.")
         except Exception as e:
             print(f"Skipping best weights copy due to error: {e}")
-    return start_epoch, best_val_loss, epochs_since_improvement, train_losses, val_losses
+    return (start_epoch, best_val_loss, epochs_since_improvement,
+            train_losses, val_losses, val_mapes, val_r2s, val_abs_scores)
+
 
 def run_training(model, train_loader, val_loader, config, optimizer, scheduler, output_dir, uuid_str):
     device = get_device()
@@ -404,12 +421,14 @@ def run_training(model, train_loader, val_loader, config, optimizer, scheduler, 
     epochs_since_improvement = 0
     start_epoch = 0
     train_losses, val_losses = [], []
+    val_mapes, val_r2s, val_abs_scores = [], [], []
 
     # Load checkpoint if path provided
     if "load_checkpoint_path" in config:
         checkpoint_dir = config["load_checkpoint_path"]
         if os.path.exists(checkpoint_dir):
-            start_epoch, best_val_loss, epochs_since_improvement, train_losses, val_losses = \
+            (start_epoch, best_val_loss, epochs_since_improvement,
+            train_losses, val_losses, val_mapes, val_r2s, val_abs_scores) = \
                 load_checkpoint(checkpoint_dir, output_dir, model, optimizer, scheduler, config, uuid_str)
         else:
             raise Exception(" The provided checkpoint path does not exist!")
@@ -463,10 +482,16 @@ def run_training(model, train_loader, val_loader, config, optimizer, scheduler, 
         # Append losses to history
         train_losses.append(avg_train)
         val_losses.append(avg_val)
+        val_mapes.append(float(avg_mape))
+        val_r2s.append(float(avg_r2))
+        val_abs_scores.append(float(abs_score))
+
 
         # Save checkpoint
         save_checkpoint(output_dir, uuid_str, epoch, model, optimizer, scheduler,
-                        best_val_loss, epochs_since_improvement, train_losses, val_losses)
+                        best_val_loss, epochs_since_improvement,
+                        train_losses, val_losses,
+                        val_mapes, val_r2s, val_abs_scores)
 
         # Early stopping
         improved = avg_val < (best_val_loss - 1e-12)
@@ -679,12 +704,125 @@ def evaluate_model(model, dataloader, device, output_dir, config):
     
     plot_losses_from_output_dir(output_dir)
 
+    return {
+        "metrics": metrics,
+        "paths": {
+            "metrics_json": out_path,
+            "hist_unscaled": os.path.join(output_dir, "hist_unscaled_overlay.png"),
+            "hist_scaled": os.path.join(output_dir, "hist_scaled_overlay.png"),
+            "loss_plot": os.path.join(output_dir, "loss_plot.png"),
+            "loss_plot_loglog": os.path.join(output_dir, "loss_plot_loglog.png"),
+        }
+    }
+
+def flatten_dict(d, parent_key="", sep="."):
+    out = {}
+    for k, v in d.items():
+        key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            out.update(flatten_dict(v, key, sep=sep))
+        else:
+            out[key] = v
+    return out
+
+def log_to_mlflow(config, uuid_str, output_dir, model, eval_out, input_example=None):
+
+    # params: model param count + flattened config
+    mlflow.log_param("num_parameters", int(sum(p.numel() for p in model.parameters())))
+
+    flat = flatten_dict(config)
+    for k, v in flat.items():
+        mlflow.log_param(k, v)
+
+    # artifacts: config json
+    mlflow.log_artifact(os.path.join(output_dir, "config.json"))
+
+    # # metrics: scaled & unscaled (overall + per-target)
+    metrics = eval_out["metrics"]
+    # for scale in ["scaled", "unscaled"]:
+    #     mlflow.log_metric(f"{scale}_overall_mape", metrics[scale]["overall"]["MAPE"])
+    #     mlflow.log_metric(f"{scale}_overall_r2", metrics[scale]["overall"]["R2"])
+    #     mlflow.log_metric(f"{scale}_overall_abs_score", metrics[scale]["overall"]["abs_score"])
+
+    #     for tgt, vals in metrics[scale]["per_target"].items():
+    #         mlflow.log_metric(f"{scale}_{tgt}_mape", vals["MAPE"])
+    #         mlflow.log_metric(f"{scale}_{tgt}_r2", vals["R2"])
+    #         mlflow.log_metric(f"{scale}_{tgt}_abs_score", vals["abs_score"])
+
+    for scale in ["scaled", "unscaled"]:
+        mlflow.log_metric(f"eval/{scale}/overall/mape", metrics[scale]["overall"]["MAPE"])
+        mlflow.log_metric(f"eval/{scale}/overall/r2", metrics[scale]["overall"]["R2"])
+        mlflow.log_metric(f"eval/{scale}/overall/abs_score", metrics[scale]["overall"]["abs_score"])
+
+        for tgt, vals in metrics[scale]["per_target"].items():
+            mlflow.log_metric(f"eval/{scale}/{tgt}/mape", vals["MAPE"])
+            mlflow.log_metric(f"eval/{scale}/{tgt}/r2", vals["R2"])
+            mlflow.log_metric(f"eval/{scale}/{tgt}/abs_score", vals["abs_score"])
+
+
+    # artifacts: metrics.json + plots
+    for p in eval_out["paths"].values():
+        mlflow.log_artifact(p)
+
+    # artifacts: checkpoint + best weights
+    latest_ckpt = [f for f in os.listdir(output_dir) if f.endswith(".latest.pt")][0]
+    latest_ckpt_path = os.path.join(output_dir, latest_ckpt)
+    best_weights_path = os.path.join(output_dir, f"{uuid_str}.best_weights.pt")
+
+    mlflow.log_artifact(latest_ckpt_path)
+    mlflow.log_artifact(best_weights_path)
+
+    # histories (lists) from checkpoint: log as artifact + per-epoch metrics
+    ckpt = torch.load(latest_ckpt_path, map_location="cpu")
+    histories = {
+        "train_losses": ckpt["train_losses"],
+        "val_losses": ckpt["val_losses"],
+        "val_mapes": ckpt["val_mapes"],
+        "val_r2s": ckpt["val_r2s"],
+        "val_abs_scores": ckpt["val_abs_scores"],
+    }
+
+    hist_path = os.path.join(output_dir, "histories.json")
+    with open(hist_path, "w") as f:
+        json.dump(histories, f, indent=2)
+    mlflow.log_artifact(hist_path)
+
+    for i in range(len(histories["train_losses"])):
+        mlflow.log_metric("history/train_loss", float(histories["train_losses"][i]), step=i)
+        mlflow.log_metric("history/val_loss", float(histories["val_losses"][i]), step=i)
+        mlflow.log_metric("history/val_mape", float(histories["val_mapes"][i]), step=i)
+        mlflow.log_metric("history/val_r2", float(histories["val_r2s"][i]), step=i)
+        mlflow.log_metric("history/val_abs_score", float(histories["val_abs_scores"][i]), step=i)
+
+    # log best model (model already has best weights loaded)
+    if input_example is not None:
+        x_example = input_example.detach().cpu()
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            y_example = model(x_example.to(next(model.parameters()).device)).detach().cpu()
+        if was_training:
+            model.train()
+        signature = infer_signature(x_example.numpy(), y_example.numpy())
+    else:
+        signature = None
+
+
+    mlflow.pytorch.log_model(
+        model,
+        name="model_best",
+        input_example=x_example.numpy() if input_example is not None else None,
+        signature=signature
+    )
+
+
+
+
 #############################
 # main
 #############################
     
 def main():
-    
     # logging.basicConfig(stream=sys.stdout, format='%(asctime)s %(levelname)s:%(message)s', level=logging.INFO, datefmt='%I:%M:%S')
 
     # load config
@@ -797,7 +935,23 @@ def main():
     model.load_state_dict(torch.load(best_weights_path, map_location=get_device()))
 
     print("Running evaluation...")
-    evaluate_model(model, test_loader, device=get_device(), output_dir=output_dir, config=config)
+    eval_out = evaluate_model(model, test_loader, device=get_device(), output_dir=output_dir, config=config)
+
+    ################## MLFlow + Databricks Tracking ####################
+    if config.get("mlflow", {}).get("enabled", False):
+        print("\nStarting MLflow...")
+        os.environ["DATABRICKS_CONFIG_FILE"] = "../secrets/.databrickscfg"
+
+        mlflow.login(interactive=False)
+        print("MLflow login successful.")
+
+        mlflow.set_experiment(config["mlflow"]["experiment"])
+        with mlflow.start_run(run_name=uuid_str):
+            print("Uploading run data to MLflow...")
+            x_example = next(iter(val_loader))[0][:5]   # CPU tensor likely
+            log_to_mlflow(config, uuid_str, output_dir, model, eval_out, input_example=x_example)
+
+        print("MLflow upload successful.\n")
 
 
     ################## END ######################

@@ -3,7 +3,7 @@
     "input_shape": 4,
     "amplitude_shape": 36,
     "data_dir": "/scratch/akula.ha/dataset",
-    "seed": 42,
+    "seed": 1,
     "var_y": [
         "y5",
         "y6"
@@ -17,9 +17,11 @@
     "width": 30,
     "depth": 12,
     "skip_block_layers": 5,
-    "lr_decay_type": "exponential",
+    "lr_decay_type": "plateau",
     "initial_lr": 0.001,
-    "lr_gamma": 0.9935,
+    "lr_patience": 20,
+    "lr_factor": 0.8,
+    "lr_delta": 1e-05,
     "batch_size": 1024,
     "steps_per_epoch": 2400,
     "early_stopping_start_epoch": 200,
@@ -27,10 +29,10 @@
     "loss": "huber",
     "base_directory": "../models/",
     "epochs": 2000,
-    "model-uuid": "y5y6exp",
+    "model-uuid": "y5y6m1",
     "train-samples-used": 6,
     "validate-samples-used": 6,
     "test-samples-used": 6,
     "n_targets": 2,
-    "load_checkpoint_path": "../models/skip-mini_y5y6exp_30_12_5"
+    "load_checkpoint_path": "/projects/talisman/akulaha/qqzz4l-NN/models/skip-mini_y5y6m1_30_12_5"
 }
