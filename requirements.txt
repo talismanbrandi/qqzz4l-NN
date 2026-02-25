@@ -1,9 +1,9 @@
 matplotlib==3.8.3
 mlflow==3.1.4
 mlflow_skinny==3.1.4
-numpy==2.4.2
+numpy==1.26.4
 optuna==4.0.0
-pandas==3.0.1
+pandas==2.3.3
 pyspark==3.5.1
 pytorch_model_summary==0.1.2
 scikit_learn==1.4.0
