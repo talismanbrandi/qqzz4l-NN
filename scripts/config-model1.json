@@ -34,5 +34,9 @@
     "validate-samples-used": 6,
     "test-samples-used": 6,
     "n_targets": 2,
-    "load_checkpoint_path": "/projects/talisman/akulaha/qqzz4l-NN/models/skip-mini_y5y6m1_30_12_5"
+    "load_checkpoint_path": "/projects/talisman/akulaha/qqzz4l-NN/models/skip-mini_y5y6m1_30_12_5",
+    "mlflow": { 
+        "enabled": true, 
+        "experiment": "/Users/harish.akula096@gmail.com/regressors" 
+    }
 }

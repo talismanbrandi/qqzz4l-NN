@@ -28,7 +28,7 @@
     "patience": 250,
     "loss": "huber",
     "base_directory": "../models/",
-    "epochs": 5,
+    "epochs": 2000,
     "model-uuid": "mlflowtest",
     "train-samples-used": 6,
     "validate-samples-used": 6,
