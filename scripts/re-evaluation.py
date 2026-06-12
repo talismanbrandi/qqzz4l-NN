@@ -83,6 +83,38 @@ def _percent_delta(y_true, y_pred, eps=0):
     return (y_pred - y_true) / (y_true + eps) * 100.0
 
 
+def _compute_error_distribution_stats(delta_matrix, labels):
+    """Compute summary stats for each error-distribution column."""
+    per_target = {}
+
+    for j, name in enumerate(labels):
+        values = np.asarray(delta_matrix[:, j], dtype=float)
+        values = values[np.isfinite(values)]
+
+        if values.size == 0:
+            raise ValueError(
+                f"No finite error values found for target '{name}'. "
+                "Check the delta calculation and filtering pipeline."
+            )
+
+        mean_val = float(np.mean(values))
+        std_val = float(np.std(values))
+        beyond_3sigma = 0 if std_val == 0.0 else int(
+            np.sum(np.abs(values - mean_val) > 3.0 * std_val)
+        )
+
+        per_target[name] = {
+            "count": int(values.size),
+            "mean": mean_val,
+            "std": std_val,
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+            "beyond_3sigma_count": beyond_3sigma,
+        }
+
+    return per_target
+
+
 def _plot_error_histograms(delta_matrix, labels, cutoff=5, title="Error Histogram Overlay"):
     """Overlay histogram for each target column in delta_matrix."""
     plt.figure(figsize=(8, 5))
@@ -163,19 +195,37 @@ def evaluate_model(model, dataloader, device, output_dir, config):
     # -------- Deltas (arrays, no DataFrame) --------
     scaled_delta   = _percent_delta(y_true,    y_pred)
     unscaled_delta = _percent_delta(y_true_un, y_pred_un)
+    scaled_error_stats = _compute_error_distribution_stats(scaled_delta, y_names)
+    unscaled_error_stats = _compute_error_distribution_stats(unscaled_delta, y_names)
 
     # -------- Save metrics JSON --------
-    metrics = {"scaled": scaled, "unscaled": unscaled, "meta": {"num_samples": int(y_true.shape[0]), "targets": y_names}}
+    metrics = {
+        "scaled": scaled,
+        "unscaled": unscaled,
+        "error_stats": {
+            "scaled": scaled_error_stats,
+            "unscaled": unscaled_error_stats,
+        },
+        "meta": {"num_samples": int(y_true.shape[0]), "targets": y_names},
+    }
     out_path = os.path.join(output_dir, "metrics.json")
     with open(out_path, "w") as f:
         json.dump(metrics, f, indent=2)
 
     # -------- Save plots (overlay style) --------
     _save_error_plots_from_arrays(
-        unscaled_delta, y_names, os.path.join(output_dir, "hist_unscaled_overlay.png"), cutoff=5
+        unscaled_delta,
+        y_names,
+        os.path.join(output_dir, "hist_unscaled_overlay.png"),
+        cutoff=5,
+        stats=unscaled_error_stats,
     )
     _save_error_plots_from_arrays(
-        scaled_delta, y_names, os.path.join(output_dir, "hist_scaled_overlay.png"), cutoff=5
+        scaled_delta,
+        y_names,
+        os.path.join(output_dir, "hist_scaled_overlay.png"),
+        cutoff=5,
+        stats=scaled_error_stats,
     )
 
     # Console summary
@@ -284,16 +334,33 @@ def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, confi
     unscaled_delta = _percent_delta(y_true_un, y_pred_un)
 
     os.makedirs(output_dir, exist_ok=True)
+
+    metrics = {
+        "scaled": scaled,
+        "unscaled": unscaled,
+        "error_stats": {
+            "scaled": _compute_error_distribution_stats(scaled_delta, y_names),
+            "unscaled": _compute_error_distribution_stats(unscaled_delta, y_names),
+        },
+        "meta": {"num_samples": int(y_true.shape[0]), "targets": y_names},
+    }
+
+    metrics_path = os.path.join(output_dir, "metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+
     _save_error_plots_from_arrays(
         unscaled_delta, y_names,
-        os.path.join(output_dir, "hist_unscaled_overlay.png"), cutoff=5
+        os.path.join(output_dir, "hist_unscaled_overlay.png"), cutoff=5,
+        stats=metrics["error_stats"]["unscaled"]
     )
     _save_error_plots_from_arrays(
         scaled_delta, y_names,
-        os.path.join(output_dir, "hist_scaled_overlay.png"), cutoff=5
+        os.path.join(output_dir, "hist_scaled_overlay.png"), cutoff=5,
+        stats=metrics["error_stats"]["scaled"]
     )
 
-    return scaled, unscaled
+    return metrics
 
 def run_ensemble_evaluation(test_df, checkpoint_paths, config, dataloader, pair, eps=0):
     print(f"\n{'#' * 80}")
@@ -312,7 +379,7 @@ def run_ensemble_evaluation(test_df, checkpoint_paths, config, dataloader, pair,
         config["activation"],
     ).to(get_device())
 
-    scaled_metrics, unscaled_metrics = ensemble_from_checkpoints(
+    ensemble_metrics = ensemble_from_checkpoints(
         model=ensemble_model,
         checkpoint_paths=checkpoint_paths,
         dataloader=dataloader,
@@ -326,8 +393,7 @@ def run_ensemble_evaluation(test_df, checkpoint_paths, config, dataloader, pair,
         "checkpoint_paths": checkpoint_paths,
         "config": config,
         "filtered_test_df": test_df.copy(deep=True),
-        "scaled_metrics": scaled_metrics,
-        "unscaled_metrics": unscaled_metrics,
+        "metrics": ensemble_metrics,
         "output_dir": ensemble_output_dir,
     }
 
@@ -500,9 +566,9 @@ def filter_test_dataframe_min_abs(df, cols, threshold=1e-8):
 #     """(y_pred - y_true)/y_true * 100 without zero-guard."""
 #     return (y_pred - y_true) / y_true * 100.0
 
-def _save_error_plots_from_arrays(delta_matrix, labels, out_path, cutoff=5):
+def _save_error_plots_from_arrays(delta_matrix, labels, out_path, cutoff=5, stats=None):
     """Overlay histogram for each target column in delta_matrix."""
-    plt.figure()
+    fig, ax = plt.subplots()
     for j, name in enumerate(labels):
         col = delta_matrix[:, j]
         m = np.isfinite(col)
@@ -511,15 +577,39 @@ def _save_error_plots_from_arrays(delta_matrix, labels, out_path, cutoff=5):
         data = col[m]
         if data.size == 0:
             continue
-        plt.hist(data, bins=100, histtype='step', label=name, density=True)
-    plt.grid(True, linestyle='dotted', alpha=0.5)
-    plt.xlabel(r'$\delta$')
-    plt.ylabel('pdf')
-    plt.xticks(np.arange(-cutoff, cutoff + 1, 1))
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
+        ax.hist(data, bins=100, histtype='step', label=name, density=True)
+    ax.grid(True, linestyle='dotted', alpha=0.5)
+    ax.set_xlabel(r'$\delta$ (%)')
+    ax.set_ylabel('pdf')
+    if cutoff is not None:
+        ax.set_xticks(np.arange(-cutoff, cutoff + 1, 1))
+    ax.legend()
+
+    if stats is not None:
+        footer_lines = []
+        for name in labels:
+            target_stats = stats[name]
+            footer_lines.append(
+                f"{name}: mean={target_stats['mean']:.3f}, std={target_stats['std']:.3f}, "
+                f"min={target_stats['min']:.3f}, max={target_stats['max']:.3f}, "
+                f">3σ={target_stats['beyond_3sigma_count']}"
+            )
+
+        fig.tight_layout()
+        fig.subplots_adjust(bottom=0.20)
+        fig.text(
+            0.5,
+            0.055,
+            "\n".join(footer_lines),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+    else:
+        fig.tight_layout()
+
+    fig.savefig(out_path)
+    plt.close(fig)
 
 def plot_losses_from_output_dir(output_dir, title="Training vs Validation Loss"):
     """
@@ -725,10 +815,20 @@ def log_to_mlflow(config, uuid_str, output_dir, model, eval_out, input_example=N
             is_real = int(tgt[1:])%2
             num_title = ["imag", "real"]
             target = num_title[is_real]
+            error_stats = metrics["error_stats"][scale][tgt]
 
             mlflow.log_metric(f"eval/{scale}/{target}/mape", vals["MAPE"])
             mlflow.log_metric(f"eval/{scale}/{target}/r2", vals["R2"])
             mlflow.log_metric(f"eval/{scale}/{target}/abs_score", vals["abs_score"])
+            mlflow.log_metric(f"eval/{scale}/{target}/error/mean", error_stats["mean"])
+            mlflow.log_metric(f"eval/{scale}/{target}/error/std", error_stats["std"])
+            mlflow.log_metric(f"eval/{scale}/{target}/error/min", error_stats["min"])
+            mlflow.log_metric(f"eval/{scale}/{target}/error/max", error_stats["max"])
+            mlflow.log_metric(
+                f"eval/{scale}/{target}/error/beyond_3sigma_count",
+                error_stats["beyond_3sigma_count"]
+            )
+            mlflow.log_metric(f"eval/{scale}/{target}/error/count", error_stats["count"])
 
 
     # artifacts: metrics.json + plots
@@ -797,7 +897,7 @@ def mlflow_tracking_helper(config, uuid_str, output_dir, model, eval_out, test_l
         mlflow.login(interactive=False)
         print("MLflow login successful.")
 
-        mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-reevaluate-stricter-1e-5-v2")
+        mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-reevaluate-stricter-1e-5-v3")
         with mlflow.start_run(run_name=uuid_str):
             print("Uploading run data to MLflow...")
             x_example = next(iter(test_loader))[0][:5]   # CPU tensor likely
@@ -805,7 +905,7 @@ def mlflow_tracking_helper(config, uuid_str, output_dir, model, eval_out, test_l
 
         print("MLflow upload successful.\n")
 
-def log_ensemble_to_mlflow(pair, pair_config, scaled_metrics, unscaled_metrics, ensemble_output_dir):
+def log_ensemble_to_mlflow(pair, pair_config, ensemble_metrics, ensemble_output_dir):
     
     ensemble_config = dict(pair_config)
     ensemble_config["seeds"] = MODEL_SEEDS
@@ -814,20 +914,32 @@ def log_ensemble_to_mlflow(pair, pair_config, scaled_metrics, unscaled_metrics, 
     with open(config_path, "w") as f:
         json.dump(ensemble_config, f, indent=2)
 
-    mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-ensembles-stricter-1e-5-v2")
+    mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-ensembles-stricter-1e-5-v3")
     with mlflow.start_run(run_name=pair):
-        for scale, m in [("scaled", scaled_metrics), ("unscaled", unscaled_metrics)]:
+        for scale in ["scaled", "unscaled"]:
+            m = ensemble_metrics[scale]
             mlflow.log_metric(f"eval/{scale}/overall/mape",      m["overall"]["MAPE"])
             mlflow.log_metric(f"eval/{scale}/overall/r2",        m["overall"]["R2"])
             mlflow.log_metric(f"eval/{scale}/overall/abs_score", m["overall"]["abs_score"])
             for tgt, vals in m["per_target"].items():
                 target = ["imag", "real"][int(tgt[1:]) % 2]
+                error_stats = ensemble_metrics["error_stats"][scale][tgt]
                 mlflow.log_metric(f"eval/{scale}/{target}/mape",      vals["MAPE"])
                 mlflow.log_metric(f"eval/{scale}/{target}/r2",        vals["R2"])
                 mlflow.log_metric(f"eval/{scale}/{target}/abs_score", vals["abs_score"])
+                mlflow.log_metric(f"eval/{scale}/{target}/error/mean", error_stats["mean"])
+                mlflow.log_metric(f"eval/{scale}/{target}/error/std", error_stats["std"])
+                mlflow.log_metric(f"eval/{scale}/{target}/error/min", error_stats["min"])
+                mlflow.log_metric(f"eval/{scale}/{target}/error/max", error_stats["max"])
+                mlflow.log_metric(
+                    f"eval/{scale}/{target}/error/beyond_3sigma_count",
+                    error_stats["beyond_3sigma_count"]
+                )
+                mlflow.log_metric(f"eval/{scale}/{target}/error/count", error_stats["count"])
 
         mlflow.log_artifact(os.path.join(ensemble_output_dir, "hist_scaled_overlay.png"))
         mlflow.log_artifact(os.path.join(ensemble_output_dir, "hist_unscaled_overlay.png"))
+        mlflow.log_artifact(os.path.join(ensemble_output_dir, "metrics.json"))
         mlflow.log_artifact(config_path)
         print(f"✅ Ensemble logged to MLflow for {pair}")
 
@@ -961,8 +1073,7 @@ for pair in MODEL_PAIRS:
     log_ensemble_to_mlflow(
         pair=pair,
         pair_config=pair_config,
-        scaled_metrics=all_results[pair]["ensemble"]["scaled_metrics"],
-        unscaled_metrics=all_results[pair]["ensemble"]["unscaled_metrics"],
+        ensemble_metrics=all_results[pair]["ensemble"]["metrics"],
         ensemble_output_dir=all_results[pair]["ensemble"]["output_dir"],
     )
     print(f"Completed all evaluations for pair {pair}")

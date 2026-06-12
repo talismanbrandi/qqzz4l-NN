@@ -167,3 +167,10 @@ scripts/batch_scripts/run_logs/*
 qqzz4l-NN.data.tar.gz
 summarizing_codes/*.xlsx
 secrets
+
+# mlflow downloads
+artifacts/
+mlflow_artifacts/
+*mlflow*.csv
+*mlflow*.pdf
+report_generation
