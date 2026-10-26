@@ -83,6 +83,28 @@ def _percent_delta(y_true, y_pred, eps=0):
     return (y_pred - y_true) / (y_true + eps) * 100.0
 
 
+def _save_inference_results(x, y_names, output_dir, *, y_true, y_pred,
+                            y_true_un, y_pred_un, scaled_delta, unscaled_delta):
+    """Save the legacy column layout, using inputs exactly as fed to the model."""
+    blocks = [
+        (x, [f"x{i + 1}" for i in range(x.shape[1])]),
+        (y_true, [f"{name}_scaled" for name in y_names]),
+        (y_true_un, list(y_names)),
+        (y_pred, [f"{name}_scaled_pred" for name in y_names]),
+        (y_pred_un, [f"{name}_pred" for name in y_names]),
+        (scaled_delta, [f"scaled_delta_{name}" for name in y_names]),
+        (unscaled_delta, [f"delta_{name}" for name in y_names]),
+    ]
+    df_pred = pd.concat(
+        [pd.DataFrame(values, columns=columns) for values, columns in blocks],
+        axis=1,
+    )
+    csv_path = os.path.join(output_dir, "inference-results.csv")
+    df_pred.to_csv(csv_path, index=False)
+    print(f"Saved inference results to: {csv_path}")
+    return csv_path
+
+
 def _compute_error_distribution_stats(delta_matrix, labels):
     """Compute summary stats for each error-distribution column."""
     per_target = {}
@@ -140,20 +162,23 @@ def evaluate_model(model, dataloader, device, output_dir, config):
     """
     Evaluate a trained model and save:
       - metrics.json (scaled & unscaled)
+      - inference-results.csv (per-sample inputs, targets, predictions & deltas)
       - hist_unscaled_overlay.png, hist_scaled_overlay.png
     Requires a globally available scalar y_unscale(y: float) -> float.
     """
     os.makedirs(output_dir, exist_ok=True)
 
     model.eval()
-    all_preds, all_targets = [], []
+    all_inputs, all_preds, all_targets = [], [], []
     with torch.no_grad():
         for xb, yb in dataloader:
+            all_inputs.append(xb.cpu())
             xb = xb.to(device)
             pred = model(xb).cpu()
             all_preds.append(pred)
             all_targets.append(yb.cpu())
 
+    x = torch.cat(all_inputs, dim=0).numpy()
     y_true = torch.cat(all_targets, dim=0).numpy()
     y_pred = torch.cat(all_preds, dim=0).numpy()
 
@@ -192,9 +217,15 @@ def evaluate_model(model, dataloader, device, output_dir, config):
         abs_j_un  = (1 - mape_j_un) * 100 if np.isfinite(mape_j_un) else np.nan
         unscaled["per_target"][name] = {"MAPE": float(mape_j_un), "R2": float(r2_j_un), "abs_score": float(abs_j_un)}
 
-    # -------- Deltas (arrays, no DataFrame) --------
+    # -------- Deltas and per-sample inference results --------
     scaled_delta   = _percent_delta(y_true,    y_pred)
     unscaled_delta = _percent_delta(y_true_un, y_pred_un)
+    csv_path = _save_inference_results(
+        x, y_names, output_dir,
+        y_true=y_true, y_pred=y_pred,
+        y_true_un=y_true_un, y_pred_un=y_pred_un,
+        scaled_delta=scaled_delta, unscaled_delta=unscaled_delta,
+    )
     scaled_error_stats = _compute_error_distribution_stats(scaled_delta, y_names)
     unscaled_error_stats = _compute_error_distribution_stats(unscaled_delta, y_names)
 
@@ -254,6 +285,7 @@ def evaluate_model(model, dataloader, device, output_dir, config):
         "metrics": metrics,
         "paths": {
             "metrics_json": out_path,
+            "inference_csv": csv_path,
             "hist_unscaled": os.path.join(output_dir, "hist_unscaled_overlay.png"),
             "hist_scaled": os.path.join(output_dir, "hist_scaled_overlay.png"),
             "loss_plot": os.path.join(output_dir, "loss_plot.png"),
@@ -266,7 +298,7 @@ import copy
 def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, config, output_dir, eps=0):
     assert len(checkpoint_paths) > 0, "No checkpoints provided for ensemble"
 
-    all_preds, all_targets = [], []
+    all_inputs, all_preds, all_targets = [], [], []
     model.eval()
 
     models = []
@@ -278,12 +310,14 @@ def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, confi
 
     with torch.no_grad():
         for xb, yb in dataloader:
+            all_inputs.append(xb.cpu())
             xb = xb.to(device)
             preds_per_ckpt = [m(xb).cpu() for m in models]
             mean_pred = torch.stack(preds_per_ckpt, dim=0).mean(dim=0)
             all_preds.append(mean_pred)
             all_targets.append(yb.cpu())
 
+    x = torch.cat(all_inputs, dim=0).numpy()
     y_true = torch.cat(all_targets, dim=0).numpy()
     y_pred = torch.cat(all_preds, dim=0).numpy()
     y_names = config["var_y"]
@@ -334,6 +368,13 @@ def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, confi
     unscaled_delta = _percent_delta(y_true_un, y_pred_un)
 
     os.makedirs(output_dir, exist_ok=True)
+
+    _save_inference_results(
+        x, y_names, output_dir,
+        y_true=y_true, y_pred=y_pred,
+        y_true_un=y_true_un, y_pred_un=y_pred_un,
+        scaled_delta=scaled_delta, unscaled_delta=unscaled_delta,
+    )
 
     metrics = {
         "scaled": scaled,
@@ -831,7 +872,7 @@ def log_to_mlflow(config, uuid_str, output_dir, model, eval_out, input_example=N
             mlflow.log_metric(f"eval/{scale}/{target}/error/count", error_stats["count"])
 
 
-    # artifacts: metrics.json + plots
+    # artifacts: metrics.json + inference CSV + plots
     for p in eval_out["paths"].values():
         mlflow.log_artifact(p)
 
@@ -940,6 +981,7 @@ def log_ensemble_to_mlflow(pair, pair_config, ensemble_metrics, ensemble_output_
         mlflow.log_artifact(os.path.join(ensemble_output_dir, "hist_scaled_overlay.png"))
         mlflow.log_artifact(os.path.join(ensemble_output_dir, "hist_unscaled_overlay.png"))
         mlflow.log_artifact(os.path.join(ensemble_output_dir, "metrics.json"))
+        mlflow.log_artifact(os.path.join(ensemble_output_dir, "inference-results.csv"))
         mlflow.log_artifact(config_path)
         print(f"✅ Ensemble logged to MLflow for {pair}")
 
