@@ -84,7 +84,8 @@ def _percent_delta(y_true, y_pred, eps=0):
 
 
 def _save_inference_results(x, y_names, output_dir, *, y_true, y_pred,
-                            y_true_un, y_pred_un, scaled_delta, unscaled_delta):
+                            y_true_un, y_pred_un, scaled_delta, unscaled_delta,
+                            sample_ids, included_in_metrics):
     """Save the legacy column layout, using inputs exactly as fed to the model."""
     blocks = [
         (x, [f"x{i + 1}" for i in range(x.shape[1])]),
@@ -99,10 +100,76 @@ def _save_inference_results(x, y_names, output_dir, *, y_true, y_pred,
         [pd.DataFrame(values, columns=columns) for values, columns in blocks],
         axis=1,
     )
+    df_pred["sample_id"] = sample_ids
+    df_pred["included_in_metrics"] = included_in_metrics
     csv_path = os.path.join(output_dir, "inference-results.csv")
     df_pred.to_csv(csv_path, index=False)
     print(f"Saved inference results to: {csv_path}")
     return csv_path
+
+
+def _save_and_select_inference_results(x, y_true, y_pred, y_names, output_dir,
+                                       metrics_mask=None, sample_ids=None):
+    """Save all predictions, then select only eligible rows for evaluation metrics."""
+    num_samples = len(y_true)
+    if metrics_mask is None:
+        metrics_mask = np.ones(num_samples, dtype=bool)
+    metrics_mask = np.asarray(metrics_mask, dtype=bool)
+    if metrics_mask.shape != (num_samples,):
+        raise ValueError("Metric mask must have one entry per inference sample")
+    if sample_ids is None:
+        sample_ids = np.arange(num_samples)
+    sample_ids = np.asarray(sample_ids)
+    if sample_ids.shape != (num_samples,):
+        raise ValueError("Sample IDs must have one entry per inference sample")
+
+    y_unscale_vec = np.vectorize(y_unscale)
+    y_true_un = y_unscale_vec(y_true)
+    y_pred_un = y_unscale_vec(y_pred)
+    arrays = {
+        "y_true": y_true,
+        "y_pred": y_pred,
+        "y_true_un": y_true_un,
+        "y_pred_un": y_pred_un,
+        "scaled_delta": _percent_delta(y_true, y_pred),
+        "unscaled_delta": _percent_delta(y_true_un, y_pred_un),
+    }
+    csv_path = _save_inference_results(
+        x, y_names, output_dir, **arrays,
+        sample_ids=sample_ids, included_in_metrics=metrics_mask,
+    )
+    num_metric_samples = int(metrics_mask.sum())
+    return {
+        **{name: values[metrics_mask] for name, values in arrays.items()},
+        "csv_path": csv_path,
+        "meta": {
+            "num_samples": num_metric_samples,
+            "num_inference_samples": num_samples,
+            "num_excluded_from_metrics": num_samples - num_metric_samples,
+            "targets": y_names,
+        },
+    }
+
+
+def _compute_prediction_metrics(y_true, y_pred, y_names, mape_fn):
+    """Compute the existing scores on the selected rows only."""
+    def scores(true, pred):
+        if len(true) == 0:
+            return {"MAPE": float("nan"), "R2": float("nan"), "abs_score": float("nan")}
+        mape = float(mape_fn(true, pred))
+        return {
+            "MAPE": mape,
+            "R2": float(r2_score(true, pred)),
+            "abs_score": (1 - mape) * 100 if np.isfinite(mape) else float("nan"),
+        }
+
+    return {
+        "overall": scores(y_true, y_pred),
+        "per_target": {
+            name: scores(y_true[:, j], y_pred[:, j])
+            for j, name in enumerate(y_names)
+        },
+    }
 
 
 def _compute_error_distribution_stats(delta_matrix, labels):
@@ -110,6 +177,12 @@ def _compute_error_distribution_stats(delta_matrix, labels):
     per_target = {}
 
     for j, name in enumerate(labels):
+        if len(delta_matrix) == 0:
+            per_target[name] = {
+                "count": 0, "mean": float("nan"), "std": float("nan"),
+                "min": float("nan"), "max": float("nan"), "beyond_3sigma_count": 0,
+            }
+            continue
         values = np.asarray(delta_matrix[:, j], dtype=float)
         values = values[np.isfinite(values)]
 
@@ -158,12 +231,14 @@ def _plot_error_histograms(delta_matrix, labels, cutoff=5, title="Error Histogra
     plt.close()
 
 
-def evaluate_model(model, dataloader, device, output_dir, config):
+def evaluate_model(model, dataloader, device, output_dir, config,
+                   metrics_mask=None, sample_ids=None):
     """
     Evaluate a trained model and save:
       - metrics.json (scaled & unscaled)
       - inference-results.csv (per-sample inputs, targets, predictions & deltas)
       - hist_unscaled_overlay.png, hist_scaled_overlay.png
+    Inference CSVs include all rows; metrics and histograms use metrics_mask.
     Requires a globally available scalar y_unscale(y: float) -> float.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -186,46 +261,20 @@ def evaluate_model(model, dataloader, device, output_dir, config):
     assert y_true.ndim == 2 and y_true.shape[1] == len(y_names), \
         "Mismatch between targets array shape and config['var_y']"
 
-    # -------- Scaled metrics --------
-    scaled = {}
-    overall_mape = mean_absolute_percentage_error(y_true, y_pred)
-    overall_r2   = r2_score(y_true, y_pred)
-    overall_abs  = (1 - overall_mape) * 100 if np.isfinite(overall_mape) else np.nan
-    scaled["overall"] = {"MAPE": float(overall_mape), "R2": float(overall_r2), "abs_score": float(overall_abs)}
-    scaled["per_target"] = {}
-    for j, name in enumerate(y_names):
-        mape_j = mean_absolute_percentage_error(y_true[:, j], y_pred[:, j])
-        r2_j   = r2_score(y_true[:, j], y_pred[:, j])
-        abs_j  = (1 - mape_j) * 100 if np.isfinite(mape_j) else np.nan
-        scaled["per_target"][name] = {"MAPE": float(mape_j), "R2": float(r2_j), "abs_score": float(abs_j)}
-
-    # -------- Unscaled metrics --------
-    # Your y_unscale is scalar-only; vectorize it.
-    y_unscale_vec = np.vectorize(y_unscale)
-    y_true_un = y_unscale_vec(y_true)
-    y_pred_un = y_unscale_vec(y_pred)
-
-    unscaled = {}
-    overall_mape_un = mean_absolute_percentage_error(y_true_un, y_pred_un)
-    overall_r2_un   = r2_score(y_true_un, y_pred_un)
-    overall_abs_un  = (1 - overall_mape_un) * 100 if np.isfinite(overall_mape_un) else np.nan
-    unscaled["overall"] = {"MAPE": float(overall_mape_un), "R2": float(overall_r2_un), "abs_score": float(overall_abs_un)}
-    unscaled["per_target"] = {}
-    for j, name in enumerate(y_names):
-        mape_j_un = mean_absolute_percentage_error(y_true_un[:, j], y_pred_un[:, j])
-        r2_j_un   = r2_score(y_true_un[:, j], y_pred_un[:, j])
-        abs_j_un  = (1 - mape_j_un) * 100 if np.isfinite(mape_j_un) else np.nan
-        unscaled["per_target"][name] = {"MAPE": float(mape_j_un), "R2": float(r2_j_un), "abs_score": float(abs_j_un)}
-
-    # -------- Deltas and per-sample inference results --------
-    scaled_delta   = _percent_delta(y_true,    y_pred)
-    unscaled_delta = _percent_delta(y_true_un, y_pred_un)
-    csv_path = _save_inference_results(
-        x, y_names, output_dir,
-        y_true=y_true, y_pred=y_pred,
-        y_true_un=y_true_un, y_pred_un=y_pred_un,
-        scaled_delta=scaled_delta, unscaled_delta=unscaled_delta,
+    evaluation = _save_and_select_inference_results(
+        x, y_true, y_pred, y_names, output_dir,
+        metrics_mask=metrics_mask, sample_ids=sample_ids,
     )
+    scaled = _compute_prediction_metrics(
+        evaluation["y_true"], evaluation["y_pred"], y_names,
+        mean_absolute_percentage_error,
+    )
+    unscaled = _compute_prediction_metrics(
+        evaluation["y_true_un"], evaluation["y_pred_un"], y_names,
+        mean_absolute_percentage_error,
+    )
+    scaled_delta = evaluation["scaled_delta"]
+    unscaled_delta = evaluation["unscaled_delta"]
     scaled_error_stats = _compute_error_distribution_stats(scaled_delta, y_names)
     unscaled_error_stats = _compute_error_distribution_stats(unscaled_delta, y_names)
 
@@ -237,7 +286,7 @@ def evaluate_model(model, dataloader, device, output_dir, config):
             "scaled": scaled_error_stats,
             "unscaled": unscaled_error_stats,
         },
-        "meta": {"num_samples": int(y_true.shape[0]), "targets": y_names},
+        "meta": evaluation["meta"],
     }
     out_path = os.path.join(output_dir, "metrics.json")
     with open(out_path, "w") as f:
@@ -285,7 +334,7 @@ def evaluate_model(model, dataloader, device, output_dir, config):
         "metrics": metrics,
         "paths": {
             "metrics_json": out_path,
-            "inference_csv": csv_path,
+            "inference_csv": evaluation["csv_path"],
             "hist_unscaled": os.path.join(output_dir, "hist_unscaled_overlay.png"),
             "hist_scaled": os.path.join(output_dir, "hist_scaled_overlay.png"),
             "loss_plot": os.path.join(output_dir, "loss_plot.png"),
@@ -295,7 +344,8 @@ def evaluate_model(model, dataloader, device, output_dir, config):
 
 import copy
 
-def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, config, output_dir, eps=0):
+def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, config,
+                              output_dir, eps=0, metrics_mask=None, sample_ids=None):
     assert len(checkpoint_paths) > 0, "No checkpoints provided for ensemble"
 
     all_inputs, all_preds, all_targets = [], [], []
@@ -322,33 +372,20 @@ def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, confi
     y_pred = torch.cat(all_preds, dim=0).numpy()
     y_names = config["var_y"]
 
-    scaled = {}
-    overall_mape = safe_mape(y_true, y_pred, eps=eps)
-    overall_r2 = r2_score(y_true, y_pred)
-    overall_abs = (1 - overall_mape) * 100 if np.isfinite(overall_mape) else np.nan
-    scaled["overall"] = {"MAPE": overall_mape, "R2": overall_r2, "abs_score": overall_abs}
-    scaled["per_target"] = {}
-    for j, name in enumerate(y_names):
-        mape_j = safe_mape(y_true[:, j], y_pred[:, j], eps=eps)
-        r2_j = r2_score(y_true[:, j], y_pred[:, j])
-        abs_j = (1 - mape_j) * 100 if np.isfinite(mape_j) else np.nan
-        scaled["per_target"][name] = {"MAPE": mape_j, "R2": r2_j, "abs_score": abs_j}
+    os.makedirs(output_dir, exist_ok=True)
+    evaluation = _save_and_select_inference_results(
+        x, y_true, y_pred, y_names, output_dir,
+        metrics_mask=metrics_mask, sample_ids=sample_ids,
+    )
+    def ensemble_mape(true, pred):
+        return safe_mape(true, pred, eps=eps)
 
-    y_unscale_vec = np.vectorize(y_unscale)
-    y_true_un = y_unscale_vec(y_true)
-    y_pred_un = y_unscale_vec(y_pred)
-
-    unscaled = {}
-    overall_mape_un = safe_mape(y_true_un, y_pred_un, eps=eps)
-    overall_r2_un = r2_score(y_true_un, y_pred_un)
-    overall_abs_un = (1 - overall_mape_un) * 100 if np.isfinite(overall_mape_un) else np.nan
-    unscaled["overall"] = {"MAPE": overall_mape_un, "R2": overall_r2_un, "abs_score": overall_abs_un}
-    unscaled["per_target"] = {}
-    for j, name in enumerate(y_names):
-        mape_j_un = safe_mape(y_true_un[:, j], y_pred_un[:, j], eps=eps)
-        r2_j_un = r2_score(y_true_un[:, j], y_pred_un[:, j])
-        abs_j_un = (1 - mape_j_un) * 100 if np.isfinite(mape_j_un) else np.nan
-        unscaled["per_target"][name] = {"MAPE": mape_j_un, "R2": r2_j_un, "abs_score": abs_j_un}
+    scaled = _compute_prediction_metrics(
+        evaluation["y_true"], evaluation["y_pred"], y_names, ensemble_mape,
+    )
+    unscaled = _compute_prediction_metrics(
+        evaluation["y_true_un"], evaluation["y_pred_un"], y_names, ensemble_mape,
+    )
 
     print("\n=== Ensemble Evaluation (SCALED) ===")
     print(f"Overall MAPE: {scaled['overall']['MAPE']:.6f}")
@@ -364,17 +401,8 @@ def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, confi
     for n, v in unscaled["per_target"].items():
         print(f"{n}: MAPE={v['MAPE']:.6f}, R2={v['R2']:.6f}, abs={v['abs_score']:.6f}")
 
-    scaled_delta = _percent_delta(y_true, y_pred)
-    unscaled_delta = _percent_delta(y_true_un, y_pred_un)
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    _save_inference_results(
-        x, y_names, output_dir,
-        y_true=y_true, y_pred=y_pred,
-        y_true_un=y_true_un, y_pred_un=y_pred_un,
-        scaled_delta=scaled_delta, unscaled_delta=unscaled_delta,
-    )
+    scaled_delta = evaluation["scaled_delta"]
+    unscaled_delta = evaluation["unscaled_delta"]
 
     metrics = {
         "scaled": scaled,
@@ -383,7 +411,7 @@ def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, confi
             "scaled": _compute_error_distribution_stats(scaled_delta, y_names),
             "unscaled": _compute_error_distribution_stats(unscaled_delta, y_names),
         },
-        "meta": {"num_samples": int(y_true.shape[0]), "targets": y_names},
+        "meta": evaluation["meta"],
     }
 
     metrics_path = os.path.join(output_dir, "metrics.json")
@@ -403,7 +431,8 @@ def ensemble_from_checkpoints(model, checkpoint_paths, dataloader, device, confi
 
     return metrics
 
-def run_ensemble_evaluation(test_df, checkpoint_paths, config, dataloader, pair, eps=0):
+def run_ensemble_evaluation(test_df, checkpoint_paths, config, dataloader, pair,
+                            eps=0, metrics_mask=None, sample_ids=None):
     print(f"\n{'#' * 80}")
     print(f"Starting ensemble evaluation for targets: {config['var_y']}")
     print(f"Using {len(checkpoint_paths)} checkpoints")
@@ -428,12 +457,15 @@ def run_ensemble_evaluation(test_df, checkpoint_paths, config, dataloader, pair,
         config=config,
         output_dir=ensemble_output_dir,
         eps=eps,
+        metrics_mask=metrics_mask,
+        sample_ids=sample_ids,
     )
 
     return {
         "checkpoint_paths": checkpoint_paths,
         "config": config,
-        "filtered_test_df": test_df.copy(deep=True),
+        "test_df": test_df,
+        "filtered_test_df": test_df.loc[metrics_mask] if metrics_mask is not None else test_df,
         "metrics": ensemble_metrics,
         "output_dir": ensemble_output_dir,
     }
@@ -993,6 +1025,7 @@ DATA_DIR = "/scratch/akula.ha/dataset"
 THRESHOLD = 1e-5
 
 all_results = {}
+shared_test_df = None
 
 for pair in MODEL_PAIRS:
     print(f"\n{'#' * 80}")
@@ -1004,32 +1037,40 @@ for pair in MODEL_PAIRS:
     pair_config = load_model_artifacts(pair_bootstrap_uuid, ARTIFACT_ROOT)
     pair_config["data_dir"] = DATA_DIR
 
-    print(f"Loading dataset for {pair} using bootstrap model {pair_bootstrap_uuid}")
-    df, spark = load_data(pair_config)
+    if shared_test_df is None:
+        print(f"Loading shared test points using bootstrap model {pair_bootstrap_uuid}")
+        shared_data_config = copy.deepcopy(pair_config)
+        shared_data_config["var_y"] = "all"
+        # Re-evaluation only needs test data. Preserve the configured test limit.
+        shared_data_config["train-sample-size"] = 0
+        shared_data_config["validate-sample-size"] = 0
+        df, spark = load_data(shared_data_config)
+        shared_test_df = df["test"].reset_index(drop=True)
+        del df
+        sample_ids = shared_test_df.index.to_numpy(copy=True)
 
     x_cols = ['x1', 'x2', 'x3', 'x4']
     y_cols = pair_config["var_y"]
 
-    test_df = df["test"].copy(deep=True)
-    # create scaled versions dynamically
+    test_df = shared_test_df[x_cols + y_cols]
     filtered_test_df = filter_test_dataframe_min_abs(
         test_df,
-        cols=y_cols,  # or scaled_cols depending on what you want
+        cols=y_cols,
         threshold=THRESHOLD,
     )
+    metrics_mask = test_df.index.isin(filtered_test_df.index)
     before = len(test_df)
     after = len(filtered_test_df)
 
-    print(f"{pair}: {before} -> {after} ({before - after} removed, {(before-after)/before*100:.2f}%)")
     print(
-        f"{pair}: filtered test rows {len(test_df)} -> {len(filtered_test_df)} "
-        f"removing target values below {THRESHOLD}"
+        f"{pair}: inference on all {before} points; metrics on {after} points "
+        f"({before - after} excluded where any target has abs(value) <= {THRESHOLD})"
     )
     print(f"Building shared test loader for {pair}")
 
     pair_test_dataset = MyDataset(
-        filtered_test_df[x_cols],
-        filtered_test_df[y_cols],
+        test_df[x_cols],
+        test_df[y_cols],
         pair_config,
     )
     batch_size = pair_config["batch_size"]
@@ -1085,14 +1126,16 @@ for pair in MODEL_PAIRS:
 
         # test_metrics, df_pred = test_model(seed_model, pair_test_loader, seed_config)
         eval_out = evaluate_model(
-            seed_model, pair_test_loader, get_device(), output_dir, seed_config
+            seed_model, pair_test_loader, get_device(), output_dir, seed_config,
+            metrics_mask=metrics_mask, sample_ids=sample_ids,
         )
         print(f"Completed single-model evaluation for {model_uuid}")
 
         all_results[pair][seed] = {
             "model_uuid": model_uuid,
             "config": seed_config,
-            "filtered_test_df": filtered_test_df.copy(deep=True),
+            "test_df": test_df,
+            "filtered_test_df": filtered_test_df,
             "scaled_metrics": eval_out["metrics"]["scaled"],
             "unscaled_metrics": eval_out["metrics"]["unscaled"],
             # "test_metrics": test_metrics,
@@ -1105,11 +1148,13 @@ for pair in MODEL_PAIRS:
     print(f"Running ensemble evaluation for pair {pair}")
     print(f"{'=' * 80}")
     all_results[pair]["ensemble"] = run_ensemble_evaluation(
-        test_df=filtered_test_df,
+        test_df=test_df,
         checkpoint_paths=pair_checkpoint_paths,
         config=pair_config,
         dataloader=pair_test_loader,
         pair=pair,
+        metrics_mask=metrics_mask,
+        sample_ids=sample_ids,
     )
 
     log_ensemble_to_mlflow(
