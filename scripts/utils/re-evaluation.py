@@ -938,7 +938,7 @@ def mlflow_tracking_helper(config, uuid_str, output_dir, model, eval_out, test_l
         mlflow.login(interactive=False)
         print("MLflow login successful.")
 
-        mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-reevaluate-stricter-1e-5-v3")
+        mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-reevaluate-stricter-1e-5-v4")
         with mlflow.start_run(run_name=uuid_str):
             print("Uploading run data to MLflow...")
             x_example = next(iter(test_loader))[0][:5]   # CPU tensor likely
@@ -955,7 +955,7 @@ def log_ensemble_to_mlflow(pair, pair_config, ensemble_metrics, ensemble_output_
     with open(config_path, "w") as f:
         json.dump(ensemble_config, f, indent=2)
 
-    mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-ensembles-stricter-1e-5-v3")
+    mlflow.set_experiment("/Users/harish.akula096@gmail.com/regressor-ensembles-stricter-1e-5-v4")
     with mlflow.start_run(run_name=pair):
         for scale in ["scaled", "unscaled"]:
             m = ensemble_metrics[scale]
