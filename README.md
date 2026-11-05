@@ -176,6 +176,83 @@ tar -xzf qqzz4l-NN.data.tar.gz
 
 ```
 
+## Download evaluation results from MLflow
+
+Run these commands from the repository root after installing `requirements.txt`
+and configuring access to the MLflow server.
+
+```bash
+# Download only inference CSVs (also the default if --download-mode is omitted).
+python scripts/utils/download_inference_results.py --download-mode csv
+
+# Download all run artifacts, including CSVs, metrics, plots, configs and weights.
+python scripts/utils/download_inference_results.py --download-mode all
+```
+
+Both modes download runs concurrently with **8 workers by default**. Each task
+handles one run and uses its own MLflow client. The model experiment is processed
+first, followed by the ensemble experiment. Set `--max-workers` to change the
+maximum number of concurrent run downloads; use `1` for sequential downloading:
+
+```bash
+# Download all artifacts with up to 4 concurrent runs to a chosen directory.
+python scripts/utils/download_inference_results.py --download-mode all \
+  --max-workers 4 --output-dir ./inference-results
+
+# Download CSVs sequentially.
+python scripts/utils/download_inference_results.py --download-mode csv --max-workers 1
+```
+
+CSV mode downloads only the matching `inference-results.csv` for each run; it
+searches artifact listings recursively without downloading the other files. All
+mode preserves the original artifact filenames and subfolders inside a folder
+for each run. Both modes process the individual-model and ensemble experiments.
+
+By default, results are saved under `inference-results/`:
+
+```text
+# CSV mode
+inference-results/models/y1y2m1.csv
+inference-results/models/y1y2m2.csv
+inference-results/ensembles/y1y2.csv
+
+# All mode
+inference-results/models/y1y2m1/inference-results.csv
+inference-results/models/y1y2m1/metrics.json
+inference-results/models/y1y2m1/config.json
+inference-results/models/y1y2m1/y1y2m1.best_weights.pt
+inference-results/ensembles/y1y2/inference-results.csv
+inference-results/ensembles/y1y2/metrics.json
+```
+
+Names come from the MLflow run name. If several runs share a name, their run IDs
+are appended: `y1y2m1__<run_id>.csv` in CSV mode or `y1y2m1__<run_id>/` in all mode.
+Existing CSVs or run folders are skipped without overwriting them. You can use
+both modes in the same output directory. Downloads are staged temporarily, so
+failed transfers do not leave a final CSV or run folder that would be skipped on
+the next attempt.
+An individual download failure does not stop the remaining runs. The final
+summary reports downloaded, skipped, missing, and failed runs for each experiment;
+the command exits with a nonzero status if any download fails or a required CSV
+is missing in CSV mode.
+
+The default experiments are
+`/Users/harish.akula096@gmail.com/regressor-reevaluate-stricter-1e-5-v4` and
+`/Users/harish.akula096@gmail.com/regressor-ensembles-stricter-1e-5-v4`.
+Available options include:
+
+- `--models-experiment` and `--ensembles-experiment`: override the full experiment names.
+- `--output-dir`: change the output directory.
+- `--max-workers`: maximum concurrent run downloads (default: `8`, minimum: `1`).
+- `--tracking-uri`: override `MLFLOW_TRACKING_URI` (default: `databricks`).
+- `--databricks-config`: override `DATABRICKS_CONFIG_FILE` (default: `./secrets/.databrickscfg`).
+- `--artifact-path`: select a run-relative CSV path when more than one matches,
+  for example `--artifact-path evaluation/inference-results.csv`. This option is
+  only valid in CSV mode.
+- `--include-deleted`: include deleted runs in the search.
+
+Use `python scripts/utils/download_inference_results.py --help` for all options.
+
 ## Suggested environment
 The model training has been tested on the Discovery cluster with a V100 GPU. The training configuration can be found in the batch script files in the `scripts/batch_scripts` folder. 
 
