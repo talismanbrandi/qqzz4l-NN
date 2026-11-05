@@ -45,7 +45,7 @@ def load_data(config):
              .appName("amp.hell").getOrCreate())
 
     # Enable Arrow-based columnar data 
-    spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+    spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "false")
     spark.conf.set(
         "spark.sql.execution.arrow.pyspark.fallback.enabled", "true"
     )

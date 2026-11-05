@@ -10,8 +10,8 @@
 #SBATCH --error=batch_scripts/run_logs/inference_runner/inf.%j.out
 
 lscpu
-nvidia-smi
 module load anaconda3
+module load OpenJDK/22.0.2
 source activate myenv
 
 python re-evaluation.py
